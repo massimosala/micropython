@@ -69,3 +69,7 @@ Methods
 .. method:: WIZNET5K.regs()
 
    Dump the WIZnet5x00 registers.  Useful for debugging.
+
+.. method:: WIZNET5K.deinit()
+
+TO BE DOCUMENTED
