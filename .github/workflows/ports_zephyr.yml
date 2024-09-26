@@ -20,10 +20,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Install packages
       run: source tools/ci.sh && ci_zephyr_setup
     - name: Install Zephyr
       run: source tools/ci.sh && ci_zephyr_install
     - name: Build
       run: source tools/ci.sh && ci_zephyr_build
+    - name: Run main test suite
+      run: source tools/ci.sh && ci_zephyr_run_tests
+    - name: Print failures
+      if: failure()
+      run: tests/run-tests.py --print-failures

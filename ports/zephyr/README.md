@@ -12,11 +12,11 @@ should work with MicroPython (but not all were tested).
 Features supported at this time:
 
 * REPL (interactive prompt) over Zephyr UART console.
-* `utime` module for time measurements and delays.
+* `time` module for time measurements and delays.
 * `machine.Pin` class for GPIO control, with IRQ support.
 * `machine.I2C` class for I2C control.
 * `machine.SPI` class for SPI control.
-* `usocket` module for networking (IPv4/IPv6).
+* `socket` module for networking (IPv4/IPv6).
 * "Frozen modules" support to allow to bundle Python modules together
   with firmware. Including complete applications, including with
   run-on-boot capability.
@@ -62,6 +62,11 @@ for a frdm_k64f board like this:
 To build for QEMU instead:
 
     $ west build -b qemu_x86 ~/micropython/ports/zephyr
+
+To build any board with the `_thread` module enabled,
+add `-DOVERLAY_CONFIG=thread.conf`, for instance:
+
+    $ west build -b frdm_k64f ~/micropython/ports/zephyr -DOVERLAY_CONFIG=thread.conf
 
 Consult the Zephyr documentation above for the list of
 supported boards.  Board configuration files appearing in `ports/zephyr/boards/`

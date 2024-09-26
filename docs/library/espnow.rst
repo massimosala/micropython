@@ -287,7 +287,7 @@ after reboot/reset). This reduces the reliability of receiving ESP-NOW messages
 
 .. method:: ESPNow.irecv([timeout_ms])
 
-    Works like `ESPNow.recv()` but will re-use internal bytearrays to store the
+    Works like `ESPNow.recv()` but will reuse internal bytearrays to store the
     return values: ``[mac, msg]``, so that no new memory is allocated on each
     call.
 
@@ -632,7 +632,7 @@ Supporting asyncio
 ------------------
 
 A supplementary module (`aioespnow`) is available to provide
-:doc:`asyncio<uasyncio>` support.
+:doc:`asyncio<asyncio>` support.
 
 **Note:** Asyncio support is available on all ESP32 targets as well as those
 ESP8266 boards which include the asyncio module (ie. ESP8266 devices with at
@@ -642,7 +642,7 @@ A small async server example::
 
     import network
     import aioespnow
-    import uasyncio as asyncio
+    import asyncio
 
     # A WLAN interface must be active to send()/recv()
     network.WLAN(network.STA_IF).active(True)
@@ -680,7 +680,7 @@ A small async server example::
     asyncio.run(main(e, peer, 120, 10))
 
 .. module:: aioespnow
-    :synopsis: ESP-NOW :doc:`uasyncio` support
+    :synopsis: ESP-NOW :doc:`asyncio` support
 
 .. class:: AIOESPNow()
 

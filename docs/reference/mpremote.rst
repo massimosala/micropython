@@ -100,6 +100,8 @@ The full list of supported commands are:
     command output)
   - ``port:<path>``: connect to the device with the given path (the first column
     from the ``connect list`` command output
+  - ``rfc2217://<host>:<port>``: connect to the device using serial over TCP
+    (e.g. a networked serial port based on RFC2217)
   - any valid device name/path, to connect to that device
 
   **Note:** Instead of using the ``connect`` command, there are several
@@ -109,7 +111,7 @@ The full list of supported commands are:
 
   **Note:** The ``auto`` option will only detect USB serial ports, i.e. a serial
   port that has an associated USB VID/PID (i.e. CDC/ACM or FTDI-style
-  devices). Other types of serial ports
+  devices). Other types of serial ports will not be auto-detected.
 
 .. _mpremote_command_disconnect:
 
@@ -467,9 +469,9 @@ An example ``config.py`` might look like:
     for ap in wl.scan():
         print(ap)
     """,], # Print out nearby WiFi networks.
-        "wl_ifconfig": [
+        "wl_ipconfig": [
     "exec",
-    "import network; sta_if = network.WLAN(network.STA_IF); print(sta_if.ifconfig())",
+    "import network; sta_if = network.WLAN(network.STA_IF); print(sta_if.ipconfig('addr4'))",
     """,], # Print ip address of station interface.
         "test": ["mount", ".", "exec", "import test"], # Mount current directory and run test.py.
         "demo": ["run", "path/to/demo.py"], # Execute demo.py on the device.
@@ -678,6 +680,13 @@ See :ref:`packages`.
   mpremote mip install github:org/repo@branch
 
 Install the package from the specified branch at org/repo on GitHub to the
+device. See :ref:`packages`.
+
+.. code-block:: bash
+
+  mpremote mip install gitlab:org/repo@branch
+
+Install the package from the specified branch at org/repo on GitLab to the
 device. See :ref:`packages`.
 
 .. code-block:: bash
