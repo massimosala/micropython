@@ -28,9 +28,18 @@
 #include <string.h>
 
 #include "py/builtin.h"
+#include "py/objlist.h"
 #include "py/objmodule.h"
 
 #if MICROPY_PY_BUILTINS_HELP
+
+#if MICROPY_PY_BUILTINS_HELP_NUM_COLUMNS <= 0
+#error "MICROPY_PY_BUILTINS_HELP_NUM_COLUMNS must be more than 0"
+#endif
+
+#if MICROPY_PY_BUILTINS_HELP_COLUMN_WIDTH <= 0
+#error "MICROPY_PY_BUILTINS_HELP_COLUMN_WIDTH must be more than 0"
+#endif
 
 const char mp_help_default_text[] =
     "Welcome to MicroPython!\n"
@@ -47,7 +56,7 @@ const char mp_help_default_text[] =
     "For further help on a specific object, type help(obj)\n"
 ;
 
-STATIC void mp_help_print_info_about_object(mp_obj_t name_o, mp_obj_t value) {
+static void mp_help_print_info_about_object(mp_obj_t name_o, mp_obj_t value) {
     mp_print_str(MP_PYTHON_PRINTER, "  ");
     mp_obj_print(name_o, PRINT_STR);
     mp_print_str(MP_PYTHON_PRINTER, " -- ");
@@ -56,7 +65,7 @@ STATIC void mp_help_print_info_about_object(mp_obj_t name_o, mp_obj_t value) {
 }
 
 #if MICROPY_PY_BUILTINS_HELP_MODULES
-STATIC void mp_help_add_from_map(mp_obj_t list, const mp_map_t *map) {
+static void mp_help_add_from_map(mp_obj_t list, const mp_map_t *map) {
     for (size_t i = 0; i < map->alloc; i++) {
         if (mp_map_slot_is_filled(map, i)) {
             mp_obj_list_append(list, map->table[i].key);
@@ -65,7 +74,7 @@ STATIC void mp_help_add_from_map(mp_obj_t list, const mp_map_t *map) {
 }
 
 #if MICROPY_MODULE_FROZEN
-STATIC void mp_help_add_from_names(mp_obj_t list, const char *name) {
+static void mp_help_add_from_names(mp_obj_t list, const char *name) {
     while (*name) {
         size_t len = strlen(name);
         // name should end in '.py' and we strip it off
@@ -75,10 +84,13 @@ STATIC void mp_help_add_from_names(mp_obj_t list, const char *name) {
 }
 #endif
 
-STATIC void mp_help_print_modules(void) {
+static void mp_help_print_modules(void) {
     mp_obj_t list = mp_obj_new_list(0, NULL);
 
     mp_help_add_from_map(list, &mp_builtin_module_map);
+    #if MICROPY_HAVE_REGISTERED_EXTENSIBLE_MODULES
+    mp_help_add_from_map(list, &mp_builtin_extensible_module_map);
+    #endif
 
     #if MICROPY_MODULE_FROZEN
     extern const char mp_frozen_names[];
@@ -89,12 +101,10 @@ STATIC void mp_help_print_modules(void) {
     mp_obj_list_sort(1, &list, (mp_map_t *)&mp_const_empty_map);
 
     // print the list of modules in a column-first order
-    #define NUM_COLUMNS (4)
-    #define COLUMN_WIDTH (18)
     size_t len;
     mp_obj_t *items;
     mp_obj_list_get(list, &len, &items);
-    unsigned int num_rows = (len + NUM_COLUMNS - 1) / NUM_COLUMNS;
+    unsigned int num_rows = (len + MICROPY_PY_BUILTINS_HELP_NUM_COLUMNS - 1) / MICROPY_PY_BUILTINS_HELP_NUM_COLUMNS;
     for (unsigned int i = 0; i < num_rows; ++i) {
         unsigned int j = i;
         for (;;) {
@@ -103,9 +113,9 @@ STATIC void mp_help_print_modules(void) {
             if (j >= len) {
                 break;
             }
-            int gap = COLUMN_WIDTH - l;
+            int gap = MICROPY_PY_BUILTINS_HELP_COLUMN_WIDTH - l;
             while (gap < 1) {
-                gap += COLUMN_WIDTH;
+                gap += MICROPY_PY_BUILTINS_HELP_COLUMN_WIDTH;
             }
             while (gap--) {
                 mp_print_str(MP_PYTHON_PRINTER, " ");
@@ -121,7 +131,7 @@ STATIC void mp_help_print_modules(void) {
 }
 #endif
 
-STATIC void mp_help_print_obj(const mp_obj_t obj) {
+static void mp_help_print_obj(const mp_obj_t obj) {
     #if MICROPY_PY_BUILTINS_HELP_MODULES
     if (obj == MP_OBJ_NEW_QSTR(MP_QSTR_modules)) {
         mp_help_print_modules();
@@ -134,7 +144,7 @@ STATIC void mp_help_print_obj(const mp_obj_t obj) {
     // try to print something sensible about the given object
     mp_print_str(MP_PYTHON_PRINTER, "object ");
     mp_obj_print(obj, PRINT_STR);
-    mp_printf(MP_PYTHON_PRINTER, " is of type %q\n", type->name);
+    mp_printf(MP_PYTHON_PRINTER, " is of type %q\n", (qstr)type->name);
 
     mp_map_t *map = NULL;
     if (type == &mp_type_module) {
@@ -149,20 +159,14 @@ STATIC void mp_help_print_obj(const mp_obj_t obj) {
     }
     if (map != NULL) {
         for (uint i = 0; i < map->alloc; i++) {
-            mp_obj_t key = map->table[i].key;
-            if (key != MP_OBJ_NULL
-                #if MICROPY_MODULE_ATTR_DELEGATION
-                // MP_MODULE_ATTR_DELEGATION_ENTRY entries have MP_QSTRnull as qstr key.
-                && key != MP_OBJ_NEW_QSTR(MP_QSTRnull)
-                #endif
-                ) {
-                mp_help_print_info_about_object(key, map->table[i].value);
+            if (mp_map_slot_is_filled(map, i)) {
+                mp_help_print_info_about_object(map->table[i].key, map->table[i].value);
             }
         }
     }
 }
 
-STATIC mp_obj_t mp_builtin_help(size_t n_args, const mp_obj_t *args) {
+static mp_obj_t mp_builtin_help(size_t n_args, const mp_obj_t *args) {
     if (n_args == 0) {
         // print a general help message
         mp_print_str(MP_PYTHON_PRINTER, MICROPY_PY_BUILTINS_HELP_TEXT);

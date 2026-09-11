@@ -1,38 +1,47 @@
-try:
-    import usocket as socket, ussl as ssl, uerrno as errno, sys
-except:
-    import socket, ssl, errno, sys, time, select
+import socket, ssl, errno, sys, time, select
+
+# Although this test doesn't need ssl.CERT_REQUIRED, it does require the ssl module
+# to support modern ciphers.  So exclude the test on axTLS which doesn't have
+# CERT_REQUIRED.
+if not hasattr(ssl, "CERT_REQUIRED"):
+    print("SKIP")
+    raise SystemExit
 
 
 def test_one(site, opts):
-    ai = socket.getaddrinfo(site, 443)
+    ai = socket.getaddrinfo(site, 443, socket.AF_INET)
     addr = ai[0][-1]
-    print(addr)
+    print(site)
 
     # Connect the raw socket
-    s = socket.socket()
+    s = socket.socket(socket.AF_INET)
     s.setblocking(False)
     try:
         s.connect(addr)
         raise OSError(-1, "connect blocks")
     except OSError as e:
         if e.errno != errno.EINPROGRESS:
-            raise
+            raise e
 
+    # Create SSLContext.
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    # CPython compatibility:
+    # - disable check_hostname
+    # - load default system certificate chain
+    # - must wait for socket to be writable before calling wrap_socket
     if sys.implementation.name != "micropython":
-        # in CPython we have to wait, otherwise wrap_socket is not happy
+        ssl_context.check_hostname = False
+        ssl_context.load_default_certs()
         select.select([], [s], [])
 
     try:
         # Wrap with SSL
         try:
-            if sys.implementation.name == "micropython":
-                s = ssl.wrap_socket(s, do_handshake=False)
-            else:
-                s = ssl.wrap_socket(s, do_handshake_on_connect=False)
+            s = ssl_context.wrap_socket(s, do_handshake_on_connect=False)
         except OSError as e:
             if e.errno != errno.EINPROGRESS:
-                raise
+                raise e
         print("wrapped")
 
         # CPython needs to be told to do the handshake
@@ -47,12 +56,12 @@ def test_one(site, opts):
                     elif err.args[0] == ssl.SSL_ERROR_WANT_WRITE:
                         select.select([], [s], [])
                     else:
-                        raise
+                        raise err
                 time.sleep(0.1)
             # print("shook hands")
 
         # Write HTTP request
-        out = b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % bytes(site, "latin")
+        out = b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % bytes(site, "ascii")
         while len(out) > 0:
             n = s.write(out)
             if n is None:
@@ -71,7 +80,7 @@ def test_one(site, opts):
             except OSError as err:
                 if err.errno == 2:  # 2=ssl.SSL_ERROR_WANT_READ:
                     continue
-                raise
+                raise err
             if b is None:
                 continue
             if len(b) > 0:
@@ -90,8 +99,7 @@ def test_one(site, opts):
 
 
 SITES = [
-    "google.com",
-    {"host": "www.google.com"},
+    "www.github.com",
     "micropython.org",
     "pypi.org",
     {"host": "api.pushbullet.com", "sni": True},
@@ -108,7 +116,7 @@ def main():
             test_one(site, opts)
             print(site, "ok")
         except Exception as e:
-            print(site, "error")
+            print(site, "error", e)
     print("DONE")
 
 

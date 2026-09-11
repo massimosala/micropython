@@ -1,5 +1,3 @@
-import sys
-
 try:
     import framebuf
     from array import array
@@ -13,16 +11,20 @@ if not hasattr(framebuf.FrameBuffer, "poly"):
     print("SKIP")
     raise SystemExit
 
+try:
+    buf = bytearray(70 * 70)
+except MemoryError:
+    print("SKIP")
+    raise SystemExit
+
 
 def print_buffer(buffer, width, height):
     for row in range(height):
         for col in range(width):
             val = buffer[(row * width) + col]
-            sys.stdout.write(" {:02x}".format(val) if val else " ··")
-        sys.stdout.write("\n")
+            print(" {:02x}".format(val) if val else " ··", end="")
+        print()
 
-
-buf = bytearray(70 * 70)
 
 w = 30
 h = 25

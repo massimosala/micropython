@@ -40,7 +40,12 @@
 // memory system, runtime and virtual machine.  The state is a global
 // variable, but in the future it is hoped that the state can become local.
 
+#if MICROPY_PY_SYS_ATTR_DELEGATION
+// Must be kept in sync with sys_mutable_keys in modsys.c.
 enum {
+    #if MICROPY_PY_SYS_PATH
+    MP_SYS_MUTABLE_PATH,
+    #endif
     #if MICROPY_PY_SYS_PS1_PS2
     MP_SYS_MUTABLE_PS1,
     MP_SYS_MUTABLE_PS2,
@@ -50,13 +55,23 @@ enum {
     #endif
     MP_SYS_MUTABLE_NUM,
 };
+#endif // MICROPY_PY_SYS_ATTR_DELEGATION
 
 // This structure contains dynamic configuration for the compiler.
 #if MICROPY_DYNAMIC_COMPILER
 typedef struct mp_dynamic_compiler_t {
+    // This is used to let mpy-cross pass options to the emitter chosen with
+    // `native_arch`.  The main use case for the time being is to give the
+    // RV32 emitter extended information about which extensions can be
+    // optionally used, in order to generate code that's better suited for the
+    // hardware platform the code will run on.
+    void *backend_options;
     uint8_t small_int_bits; // must be <= host small_int_bits
     uint8_t native_arch;
     uint8_t nlr_buf_num_regs;
+    #if MICROPY_ENABLE_SOURCE_LINE
+    bool include_source_lines;
+    #endif
 } mp_dynamic_compiler_t;
 extern mp_dynamic_compiler_t mp_dynamic_compiler;
 #endif
@@ -71,6 +86,18 @@ typedef struct _mp_sched_item_t {
     mp_obj_t arg;
 } mp_sched_item_t;
 
+// gc_lock_depth field is a combination of the GC_COLLECT_FLAG
+// bit and a lock depth shifted GC_LOCK_DEPTH_SHIFT bits left.
+#if MICROPY_ENABLE_FINALISER
+#define GC_COLLECT_FLAG 1
+#define GC_LOCK_DEPTH_SHIFT 1
+#else
+// If finalisers are disabled then this check doesn't matter, as gc_lock()
+// is called anywhere else that heap can't be changed. So save some code size.
+#define GC_COLLECT_FLAG 0
+#define GC_LOCK_DEPTH_SHIFT 0
+#endif
+
 // This structure holds information about a single contiguous area of
 // memory reserved for the memory manager.
 typedef struct _mp_state_mem_area_t {
@@ -83,10 +110,14 @@ typedef struct _mp_state_mem_area_t {
     #if MICROPY_ENABLE_FINALISER
     byte *gc_finaliser_table_start;
     #endif
+    #if MICROPY_PY_WEAKREF
+    byte *gc_weakref_table_start;
+    #endif
     byte *gc_pool_start;
     byte *gc_pool_end;
 
     size_t gc_last_free_atb_index;
+    size_t gc_last_used_block; // The block ID of the highest block allocated in the area
 } mp_state_mem_area_t;
 
 // This structure hold information about the memory allocation system.
@@ -98,6 +129,10 @@ typedef struct _mp_state_mem_t {
     #endif
 
     mp_state_mem_area_t area;
+    #if MICROPY_GC_SPLIT_HEAP
+    byte *area_pool_min;  // Min of all gc_pool_start values across all areas
+    byte *area_pool_max;  // Max of all gc_pool_end values across all areas
+    #endif
 
     int gc_stack_overflow;
     MICROPY_GC_STACK_ENTRY_TYPE gc_block_stack[MICROPY_ALLOC_GC_STACK_SIZE];
@@ -126,7 +161,7 @@ typedef struct _mp_state_mem_t {
 
     #if MICROPY_PY_THREAD && !MICROPY_PY_THREAD_GIL
     // This is a global mutex used to make the GC thread-safe.
-    mp_thread_mutex_t gc_mutex;
+    mp_thread_recursive_mutex_t gc_mutex;
     #endif
 } mp_state_mem_t;
 
@@ -203,6 +238,9 @@ typedef struct _mp_state_vm_t {
     #if MICROPY_EMIT_NATIVE
     uint8_t default_emit_opt; // one of MP_EMIT_OPT_xxx
     #endif
+    #if MICROPY_DEBUG_PRINTERS
+    mp_uint_t mp_verbose_flag;
+    #endif
     #endif
 
     // size of the emergency exception buf, if it's dynamically allocated
@@ -242,8 +280,10 @@ typedef struct _mp_state_vm_t {
     #endif
 } mp_state_vm_t;
 
-// This structure holds state that is specific to a given thread.
-// Everything in this structure is scanned for root pointers.
+// This structure holds state that is specific to a given thread. Everything
+// in this structure is scanned for root pointers.  Anything added to this
+// structure must have corresponding initialisation added to thread_entry (in
+// py/modthread.c).
 typedef struct _mp_state_thread_t {
     // Stack top at the start of program
     char *stack_top;
@@ -259,6 +299,7 @@ typedef struct _mp_state_thread_t {
     #endif
 
     // Locking of the GC is done per thread.
+    // See GC_LOCK_DEPTH_SHIFT for an explanation of this field.
     uint16_t gc_lock_depth;
 
     ////////////////////////////////////////////////////////////
@@ -284,6 +325,10 @@ typedef struct _mp_state_thread_t {
     bool prof_callback_is_executing;
     struct _mp_code_state_t *current_code_state;
     #endif
+
+    #if MICROPY_PY_SSL_MBEDTLS_NEED_ACTIVE_CONTEXT
+    struct _mp_obj_ssl_context_t *tls_ssl_context;
+    #endif
 } mp_state_thread_t;
 
 // This structure combines the above 3 structures.
@@ -301,7 +346,6 @@ extern mp_state_ctx_t mp_state_ctx;
 #define MP_STATE_MAIN_THREAD(x) (mp_state_ctx.thread.x)
 
 #if MICROPY_PY_THREAD
-extern mp_state_thread_t *mp_thread_get_state(void);
 #define MP_STATE_THREAD(x) (mp_thread_get_state()->x)
 #define mp_thread_is_main_thread() (mp_thread_get_state() == &mp_state_ctx.thread)
 #else

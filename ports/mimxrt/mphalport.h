@@ -31,18 +31,54 @@
 #include "ticks.h"
 #include "py/ringbuf.h"
 #include "pin.h"
+#include "irq.h"
 #include "fsl_clock.h"
 
 #define MICROPY_HAL_VERSION             "2.8.0"
 
+#define MICROPY_BEGIN_ATOMIC_SECTION()     disable_irq()
+#define MICROPY_END_ATOMIC_SECTION(state)  enable_irq(state)
+
+// For regular code that wants to prevent "background tasks" from running.
+// These background tasks (LWIP, Bluetooth) run in PENDSV context.
+#define MICROPY_PY_PENDSV_ENTER   uint32_t atomic_state = raise_irq_pri(IRQ_PRI_PENDSV);
+#define MICROPY_PY_PENDSV_REENTER atomic_state = raise_irq_pri(IRQ_PRI_PENDSV);
+#define MICROPY_PY_PENDSV_EXIT    restore_irq_pri(atomic_state);
+
+// Prevent the "lwIP task" from running.
+#define MICROPY_PY_LWIP_ENTER   MICROPY_PY_PENDSV_ENTER
+#define MICROPY_PY_LWIP_REENTER MICROPY_PY_PENDSV_REENTER
+#define MICROPY_PY_LWIP_EXIT    MICROPY_PY_PENDSV_EXIT
+
+// Port level Wait-for-Event macro.
+#ifndef MICROPY_INTERNAL_WFE
+#define MICROPY_INTERNAL_WFE(TIMEOUT_MS) __WFE()
+#endif
+
 #define MICROPY_HW_USB_CDC_TX_TIMEOUT   (500)
 
 #define MP_HAL_PIN_FMT                  "%q"
-extern ringbuf_t stdin_ringbuf;
+#define MP_HAL_PIN_MODE_INPUT           PIN_MODE_IN
+#define MP_HAL_PIN_MODE_OUTPUT          PIN_MODE_OUT
+#define MP_HAL_PIN_MODE_ALT             PIN_MODE_ALT
+#define MP_HAL_PIN_MODE_OPEN_DRAIN      PIN_MODE_OPEN_DRAIN
 
-// Define an alias for systick_ms, because the shared softtimer.c uses
-// the symbol uwTick for the systick ms counter.
-#define uwTick systick_ms
+#define MP_HAL_PIN_PULL_NONE            PIN_PULL_DISABLED
+#define MP_HAL_PIN_PULL_UP              PIN_PULL_UP_100K
+#define MP_HAL_PIN_PULL_DOWN            PIN_PULL_DOWN_100K
+
+#define MP_HAL_PIN_SPEED_LOW            (0)
+#define MP_HAL_PIN_SPEED_MEDIUM         (1)
+#define MP_HAL_PIN_SPEED_HIGH           (2)
+#define MP_HAL_PIN_SPEED_VERY_HIGH      (3)
+
+#define MP_HAL_PIN_TRIGGER_NONE         kGPIO_NoIntmode
+#define MP_HAL_PIN_TRIGGER_FALL         kGPIO_IntFallingEdge
+#define MP_HAL_PIN_TRIGGER_RISE         kGPIO_IntRisingEdge
+#define MP_HAL_PIN_TRIGGER_RISE_FALL    kGPIO_IntRisingOrFallingEdge
+
+extern int mp_interrupt_char;
+extern ringbuf_t stdin_ringbuf;
 
 #define mp_hal_pin_obj_t const machine_pin_obj_t *
 #define mp_hal_get_pin_obj(o)   pin_find(o)
@@ -62,7 +98,21 @@ extern ringbuf_t stdin_ringbuf;
 #define mp_hal_quiet_timing_enter() raise_irq_pri(1)
 #define mp_hal_quiet_timing_exit(irq_state) restore_irq_pri(irq_state)
 
+__attribute__((always_inline)) static inline void enable_irq(uint32_t state) {
+    __set_PRIMASK(state);
+}
+
+__attribute__((always_inline)) static inline uint32_t disable_irq(void) {
+    uint32_t state = __get_PRIMASK();
+    __disable_irq();
+    return state;
+}
+
 void mp_hal_set_interrupt_char(int c);
+
+static inline void mp_hal_wake_main_task_from_isr(void) {
+    // Defined for tinyusb support, nothing needs to be done here.
+}
 
 static inline mp_uint_t mp_hal_ticks_ms(void) {
     return ticks_ms32();
@@ -73,6 +123,9 @@ static inline mp_uint_t mp_hal_ticks_us(void) {
 }
 
 static inline void mp_hal_delay_ms(mp_uint_t ms) {
+    // This function must run events at least once, so do that now.
+    mp_event_handle_nowait();
+
     uint64_t us = (uint64_t)ms * 1000;
     ticks_delay_us64(us);
 }
@@ -110,5 +163,6 @@ void mp_hal_generate_laa_mac(int idx, uint8_t buf[6]);
 void mp_hal_get_mac(int idx, uint8_t buf[6]);
 void mp_hal_get_mac_ascii(int idx, size_t chr_off, size_t chr_len, char *dest);
 void mp_hal_get_unique_id(uint8_t id[]);
+void mp_hal_get_random(size_t n, uint8_t *buf);
 
 #endif // MICROPY_INCLUDED_MIMXRT_MPHALPORT_H

@@ -25,9 +25,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from __future__ import print_function
 import contextlib
 import os
+import re
 import sys
 import glob
 import tempfile
@@ -41,6 +41,9 @@ MODE_FREEZE = 1
 MODE_COMPILE = 2
 # Same as compile, but handles require(..., pypi="name") as a requirements.txt entry.
 MODE_PYPROJECT = 3
+# Same surface as MODE_FREEZE, but freeze/package/module are no-ops so callers
+# can collect c_module() entries without touching files referenced by freeze().
+MODE_LIST_C_MODULES = 4
 
 # In compile mode, .py -> KIND_COMPILE_AS_MPY
 # In freeze mode, .py -> KIND_FREEZE_AS_MPY, .mpy->KIND_FREEZE_MPY
@@ -61,6 +64,9 @@ KIND_COMPILE_AS_MPY = 6
 FILE_TYPE_LOCAL = 1
 # URL to file. (TODO)
 FILE_TYPE_HTTP = 2
+
+# Default list of libraries in micropython-lib to search for library packages.
+BASE_LIBRARY_NAMES = ("micropython", "python-stdlib", "python-ecosys")
 
 
 class ManifestFileError(Exception):
@@ -106,7 +112,7 @@ class ManifestPackageMetadata:
         self.stdlib = False
 
         # Allows a python-ecosys package to be annotated with the
-        # corresponding name in PyPI. e.g. micropython-lib/urequests is based
+        # corresponding name in PyPI. e.g. micropython-lib/requests is based
         # on pypi/requests.
         self.pypi = None
         # For a micropython package, this is the name that we will publish it
@@ -190,10 +196,22 @@ class ManifestFile:
         self._manifest_files = []
         # List of PyPI dependencies (when mode=MODE_PYPROJECT).
         self._pypi_dependencies = []
+        # List of C module directories.
+        self._c_modules = []
         # Don't allow including the same file twice.
         self._visited = set()
         # Stack of metadata for each level.
         self._metadata = [ManifestPackageMetadata()]
+        # Registered external libraries.
+        self._libraries = {}
+        # List of directories to search for packages.
+        self._library_dirs = []
+        # Add default micropython-lib libraries if $(MPY_LIB_DIR) has been specified.
+        # Use .get() to avoid KeyError if MPY_LIB_DIR wasn't passed (shouldn't happen
+        # in normal cmake/make builds, but be defensive for direct tool invocations).
+        if self._path_vars.get("MPY_LIB_DIR"):
+            for lib in BASE_LIBRARY_NAMES:
+                self.add_library(lib, os.path.join("$(MPY_LIB_DIR)", lib))
 
     def _resolve_path(self, path):
         # Convert path to an absolute path, applying variable substitutions.
@@ -208,13 +226,15 @@ class ManifestFile:
             "metadata": self.metadata,
             "include": self.include,
             "require": self.require,
+            "add_library": self.add_library,
             "package": self.package,
             "module": self.module,
+            "c_module": self.c_module,
             "options": IncludeOptions(**kwargs),
         }
 
         # Extra legacy functions only for freeze mode.
-        if self._mode == MODE_FREEZE:
+        if self._mode in (MODE_FREEZE, MODE_LIST_C_MODULES):
             g.update(
                 {
                     "freeze": self.freeze,
@@ -232,6 +252,9 @@ class ManifestFile:
     def pypi_dependencies(self):
         # In MODE_PYPROJECT, this will return a list suitable for requirements.txt.
         return self._pypi_dependencies
+
+    def c_modules(self):
+        return self._c_modules
 
     def execute(self, manifest_file):
         if manifest_file.endswith(".py"):
@@ -279,7 +302,7 @@ class ManifestFile:
     def _search(self, base_path, package_path, files, exts, kind, opt=None, strict=False):
         base_path = self._resolve_path(base_path)
 
-        if files:
+        if files is not None:
             # Use explicit list of files (relative to package_path).
             for file in files:
                 if package_path:
@@ -388,14 +411,23 @@ class ManifestFile:
             if is_require:
                 self._metadata.pop()
 
-    def require(self, name, version=None, unix_ffi=False, pypi=None, **kwargs):
-        """
-        Require a module by name from micropython-lib.
+    def _require_from_path(self, library_path, name, version, extra_kwargs):
+        for root, dirnames, filenames in os.walk(library_path):
+            if os.path.basename(root) == name and "manifest.py" in filenames:
+                self.include(root, is_require=True, **extra_kwargs)
+                return True
+        return False
 
-        Optionally specify unix_ffi=True to use a module from the unix-ffi directory.
+    def require(self, name, version=None, pypi=None, library=None, **kwargs):
+        """
+        Require a package by name from micropython-lib.
 
         Optionally specify pipy="package-name" to indicate that this should
         use the named package from PyPI when building for CPython.
+
+        Optionally specify library="name" to reference a package from a
+        library that has been previously registered with add_library(). Otherwise
+        the list of library paths will be used.
         """
         self._metadata[-1].check_initialised(self._mode)
 
@@ -406,26 +438,41 @@ class ManifestFile:
             self._pypi_dependencies.append(pypi)
             return
 
-        if self._path_vars["MPY_LIB_DIR"]:
-            lib_dirs = ["micropython", "python-stdlib", "python-ecosys"]
-            if unix_ffi:
-                # Search unix-ffi only if unix_ffi=True, and make unix-ffi modules
-                # take precedence.
-                lib_dirs = ["unix-ffi"] + lib_dirs
+        if library is not None:
+            # Find package in external library.
+            if library not in self._libraries:
+                raise ValueError("Unknown library '{}' for require('{}').".format(library, name))
+            library_path = self._libraries[library]
+            # Search for {library_path}/**/{name}/manifest.py.
+            if self._require_from_path(library_path, name, version, kwargs):
+                return
+            raise ValueError(
+                "Package '{}' not found in external library '{}' ({}).".format(
+                    name, library, library_path
+                )
+            )
 
-            for lib_dir in lib_dirs:
-                # Search for {lib_dir}/**/{name}/manifest.py.
-                for root, dirnames, filenames in os.walk(
-                    os.path.join(self._path_vars["MPY_LIB_DIR"], lib_dir)
-                ):
-                    if os.path.basename(root) == name and "manifest.py" in filenames:
-                        self.include(root, is_require=True, **kwargs)
-                        return
+        for lib_dir in self._library_dirs:
+            # Search for {lib_dir}/**/{name}/manifest.py.
+            if self._require_from_path(lib_dir, name, version, kwargs):
+                return
 
-            raise ValueError("Library not found in local micropython-lib: {}".format(name))
-        else:
-            # TODO: HTTP request to obtain URLs from manifest.json.
-            raise ValueError("micropython-lib not available for require('{}').", name)
+        raise ValueError("Package '{}' not found in any known library.".format(name))
+
+    def add_library(self, library, library_path, prepend=False):
+        """
+        Register the path to an external named library.
+
+        The path will be automatically searched when using require().  By default the
+        added library is added to the end of the list of libraries to search.  Pass
+        `prepend=True` to add it to the start of the list.
+
+        Additionally, the added library can be explicitly requested by using
+        `require("name", library="library")`.
+        """
+        library_path = self._resolve_path(library_path)
+        self._libraries[library] = library_path
+        self._library_dirs.insert(0 if prepend else len(self._library_dirs), library_path)
 
     def package(self, package_path, files=None, base_path=".", opt=None):
         """
@@ -443,6 +490,9 @@ class ManifestFile:
         """
         self._metadata[-1].check_initialised(self._mode)
 
+        if self._mode == MODE_LIST_C_MODULES:
+            return
+
         # Include "base_path/package_path/**/*.py" --> "package_path/**/*.py"
         self._search(base_path, package_path, files, exts=(".py",), kind=KIND_AUTO, opt=opt)
 
@@ -458,6 +508,9 @@ class ManifestFile:
         """
         self._metadata[-1].check_initialised(self._mode)
 
+        if self._mode == MODE_LIST_C_MODULES:
+            return
+
         # Include "base_path/module_path" --> "module_path"
         base_path = self._resolve_path(base_path)
         _, ext = os.path.splitext(module_path)
@@ -466,7 +519,56 @@ class ManifestFile:
         # TODO: version None
         self._add_file(os.path.join(base_path, module_path), module_path, opt=opt)
 
+    def c_module(self, module_path):
+        """
+        Include a C module directory in the build.
+
+        The module_path should be a directory containing a micropython.mk and/or
+        micropython.cmake file.
+
+        Supports $(VAR) path substitution:
+            c_module("$(MPY_DIR)/examples/usercmodule/cexample")
+            c_module("$(BOARD_DIR)/../../drivers/sensor")
+
+        Can be called multiple times to include multiple C modules.
+
+        Only has effect when collecting modules for the build system
+        (MODE_FREEZE / MODE_LIST_C_MODULES). Silent no-op in MODE_COMPILE /
+        MODE_PYPROJECT, so the same manifest can be evaluated in any mode.
+        """
+        if self._mode not in (MODE_FREEZE, MODE_LIST_C_MODULES):
+            return
+        resolved = self._resolve_path(module_path)
+        # Reject unresolved $(VAR) up front so a bad manifest fails with a
+        # clear message rather than a confusing "path does not exist" containing
+        # the variable literal.
+        unresolved = re.search(r"\$\([^)]+\)", resolved)
+        if unresolved:
+            raise ManifestFileError(
+                "Unresolved variable in c_module() path: {}".format(unresolved.group(0))
+            )
+        module_path = resolved
+        if not os.path.exists(module_path):
+            raise ManifestFileError("C module path does not exist: {}".format(module_path))
+        if not os.path.isdir(module_path):
+            raise ManifestFileError("C module path must be a directory: {}".format(module_path))
+        # Verify the directory contains a micropython.mk or micropython.cmake file.
+        has_mk = os.path.isfile(os.path.join(module_path, "micropython.mk"))
+        has_cmake = os.path.isfile(os.path.join(module_path, "micropython.cmake"))
+        if not has_mk and not has_cmake:
+            raise ManifestFileError(
+                "C module directory must contain micropython.mk or micropython.cmake: {}".format(
+                    module_path
+                )
+            )
+        self._c_modules.append(module_path)
+
     def _freeze_internal(self, path, script, exts, kind, opt):
+        # In list-c-modules mode we only care about c_module() entries; skip
+        # the file-system walk so freeze targets that don't exist (e.g. a
+        # board-conditional modules directory) don't abort the listing.
+        if self._mode == MODE_LIST_C_MODULES:
+            return
         if script is None:
             self._search(path, None, None, exts=exts, kind=kind, opt=opt)
         elif isinstance(script, str) and os.path.isdir(os.path.join(path, script)):
@@ -520,6 +622,8 @@ class ManifestFile:
         Freeze the given `path` and all .py scripts within it as a string,
         which will be compiled upon import.
         """
+        if self._mode == MODE_LIST_C_MODULES:
+            return
         self._search(path, None, None, exts=(".py",), kind=KIND_FREEZE_AS_STR)
 
     def freeze_as_mpy(self, path, script=None, opt=None):
@@ -567,6 +671,9 @@ def main():
         default=os.path.join(os.path.dirname(__file__), "../lib/micropython-lib"),
         help="path to micropython-lib repo",
     )
+    cmd_parser.add_argument(
+        "--unix-ffi", action="store_true", help="prepend unix-ffi to the library path"
+    )
     cmd_parser.add_argument("--port", default=None, help="path to port dir")
     cmd_parser.add_argument("--board", default=None, help="path to board dir")
     cmd_parser.add_argument(
@@ -596,6 +703,8 @@ def main():
         exit(1)
 
     m = ManifestFile(mode, path_vars)
+    if args.unix_ffi:
+        m.add_library("unix-ffi", os.path.join("$(MPY_LIB_DIR)", "unix-ffi"), prepend=True)
     for manifest_file in args.files:
         try:
             m.execute(manifest_file)

@@ -67,7 +67,7 @@ typedef struct _mp_bluetooth_nimble_malloc_t {
 } mp_bluetooth_nimble_malloc_t;
 
 // TODO: This is duplicated from mbedtls. Perhaps make this a generic feature?
-STATIC void *m_malloc_bluetooth(size_t size) {
+static void *m_malloc_bluetooth(size_t size) {
     size += sizeof(mp_bluetooth_nimble_malloc_t);
     mp_bluetooth_nimble_malloc_t *alloc = m_malloc0(size);
     alloc->size = size;
@@ -79,11 +79,11 @@ STATIC void *m_malloc_bluetooth(size_t size) {
     return alloc->data;
 }
 
-STATIC mp_bluetooth_nimble_malloc_t* get_nimble_malloc(void *ptr) {
-    return (mp_bluetooth_nimble_malloc_t*)((uintptr_t)ptr - sizeof(mp_bluetooth_nimble_malloc_t));
+static mp_bluetooth_nimble_malloc_t *get_nimble_malloc(void *ptr) {
+    return (mp_bluetooth_nimble_malloc_t *)((uintptr_t)ptr - sizeof(mp_bluetooth_nimble_malloc_t));
 }
 
-STATIC void m_free_bluetooth(void *ptr) {
+static void m_free_bluetooth(void *ptr) {
     mp_bluetooth_nimble_malloc_t *alloc = get_nimble_malloc(ptr);
     if (alloc->next) {
         alloc->next->prev = alloc->prev;
@@ -93,16 +93,16 @@ STATIC void m_free_bluetooth(void *ptr) {
     } else {
         MP_STATE_PORT(bluetooth_nimble_memory) = NULL;
     }
-    m_free(alloc
     #if MICROPY_MALLOC_USES_ALLOCATED_SIZE
-           , alloc->size
+    m_free(alloc, alloc->size);
+    #else
+    m_free(alloc);
     #endif
-    );
 }
 
 // Check if a nimble ptr is tracked.
 // If it isn't, that means that it's from a previous soft-reset cycle.
-STATIC bool is_valid_nimble_malloc(void *ptr) {
+static bool is_valid_nimble_malloc(void *ptr) {
     DEBUG_MALLOC_printf("NIMBLE is_valid_nimble_malloc(%p)\n", ptr);
     mp_bluetooth_nimble_malloc_t *alloc = MP_STATE_PORT(bluetooth_nimble_memory);
     while (alloc) {
@@ -117,7 +117,7 @@ STATIC bool is_valid_nimble_malloc(void *ptr) {
 
 void *nimble_malloc(size_t size) {
     DEBUG_MALLOC_printf("NIMBLE malloc(%u)\n", (uint)size);
-    void* ptr = m_malloc_bluetooth(size);
+    void *ptr = m_malloc_bluetooth(size);
     DEBUG_MALLOC_printf("  --> %p\n", ptr);
     return ptr;
 }

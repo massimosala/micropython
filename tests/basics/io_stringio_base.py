@@ -2,9 +2,10 @@
 # MP_TYPE_FLAG_ITER_IS_STREAM will still have a getiter.
 
 try:
-    import uio as io
-except ImportError:
     import io
+except ImportError:
+    print("SKIP")
+    raise SystemExit
 
 a = io.StringIO()
 a.write("hello\nworld\nmicro\npython\n")

@@ -29,14 +29,17 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <zephyr/zephyr.h>
+#include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 
 #include "py/runtime.h"
 #include "py/gc.h"
 #include "py/mphal.h"
+#include "extmod/modmachine.h"
+#include "extmod/virtpin.h"
 #include "shared/runtime/mpirq.h"
 #include "modmachine.h"
+#include "zephyr_device.h"
 
 #if MICROPY_PY_MACHINE
 
@@ -46,7 +49,7 @@ typedef struct _machine_pin_irq_obj_t {
     struct gpio_callback callback;
 } machine_pin_irq_obj_t;
 
-STATIC const mp_irq_methods_t machine_pin_irq_methods;
+static const mp_irq_methods_t machine_pin_irq_methods;
 const mp_obj_base_t machine_pin_obj_template = {&machine_pin_type};
 
 void machine_pin_deinit(void) {
@@ -58,34 +61,20 @@ void machine_pin_deinit(void) {
     MP_STATE_PORT(machine_pin_irq_list) = NULL;
 }
 
-STATIC void gpio_callback_handler(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins) {
+static void gpio_callback_handler(const struct device *port, struct gpio_callback *cb, gpio_port_pins_t pins) {
     machine_pin_irq_obj_t *irq = CONTAINER_OF(cb, machine_pin_irq_obj_t, callback);
 
-    #if MICROPY_STACK_CHECK
-    // This callback executes in an ISR context so the stack-limit check must be changed to
-    // use the ISR stack for the duration of this function (so that hard IRQ callbacks work).
-    char *orig_stack_top = MP_STATE_THREAD(stack_top);
-    size_t orig_stack_limit = MP_STATE_THREAD(stack_limit);
-    MP_STATE_THREAD(stack_top) = (void *)&irq;
-    MP_STATE_THREAD(stack_limit) = CONFIG_ISR_STACK_SIZE - 512;
-    #endif
-
     mp_irq_handler(&irq->base);
-
-    #if MICROPY_STACK_CHECK
-    // Restore original stack-limit checking values.
-    MP_STATE_THREAD(stack_top) = orig_stack_top;
-    MP_STATE_THREAD(stack_limit) = orig_stack_limit;
-    #endif
 }
 
-STATIC void machine_pin_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
+static void machine_pin_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     machine_pin_obj_t *self = self_in;
-    mp_printf(print, "<Pin %p %d>", self->port, self->pin);
+    const char *port_name = zephyr_device_get_name(self->port);
+    mp_printf(print, "<Pin %s %d>", port_name, self->pin);
 }
 
 // pin.init(mode, pull=None, *, value)
-STATIC mp_obj_t machine_pin_obj_init_helper(machine_pin_obj_t *self, size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+static mp_obj_t machine_pin_obj_init_helper(machine_pin_obj_t *self, size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
     enum { ARG_mode, ARG_pull, ARG_value };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_mode, MP_ARG_REQUIRED | MP_ARG_INT },
@@ -113,6 +102,10 @@ STATIC mp_obj_t machine_pin_obj_init_helper(machine_pin_obj_t *self, size_t n_ar
     }
 
     int ret = gpio_pin_configure(self->port, self->pin, mode | pull | init);
+    if (ret == -ENOTSUP && mode == (GPIO_OUTPUT | GPIO_INPUT)) {
+        // Some targets (eg frdm_k64f) don't support GPIO_OUTPUT|GPIO_INPUT, so try again with just GPIO_OUTPUT.
+        ret = gpio_pin_configure(self->port, self->pin, GPIO_OUTPUT | pull | init);
+    }
     if (ret) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid pin"));
     }
@@ -124,23 +117,26 @@ STATIC mp_obj_t machine_pin_obj_init_helper(machine_pin_obj_t *self, size_t n_ar
 mp_obj_t mp_pin_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     mp_arg_check_num(n_args, n_kw, 1, MP_OBJ_FUN_ARGS_MAX, true);
 
-    // get the wanted port
-    if (!mp_obj_is_type(args[0], &mp_type_tuple)) {
+    machine_pin_obj_t *pin;
+    if (mp_obj_is_type(args[0], &machine_pin_type)) {
+        // Already a Pin object, reuse it.
+        pin = MP_OBJ_TO_PTR(args[0]);
+    } else if (mp_obj_is_type(args[0], &mp_type_tuple)) {
+        // Get the wanted (port, pin) values.
+        mp_obj_t *items;
+        mp_obj_get_array_fixed_n(args[0], 2, &items);
+        const struct device *wanted_port = zephyr_device_find(items[0]);
+        int wanted_pin = mp_obj_get_int(items[1]);
+
+        pin = m_new_obj(machine_pin_obj_t);
+        pin->base = machine_pin_obj_template;
+        pin->port = wanted_port;
+        pin->pin = wanted_pin;
+        pin->irq = NULL;
+    } else {
+        // Unknown Pin.
         mp_raise_ValueError(MP_ERROR_TEXT("Pin id must be tuple of (\"GPIO_x\", pin#)"));
     }
-    mp_obj_t *items;
-    mp_obj_get_array_fixed_n(args[0], 2, &items);
-    const char *drv_name = mp_obj_str_get_str(items[0]);
-    int wanted_pin = mp_obj_get_int(items[1]);
-    const struct device *wanted_port = device_get_binding(drv_name);
-    if (!wanted_port) {
-        mp_raise_ValueError(MP_ERROR_TEXT("invalid port"));
-    }
-
-    machine_pin_obj_t *pin = m_new_obj(machine_pin_obj_t);
-    pin->base = machine_pin_obj_template;
-    pin->port = wanted_port;
-    pin->pin = wanted_pin;
 
     if (n_args > 1 || n_kw > 0) {
         // pin mode given, so configure this GPIO
@@ -153,7 +149,7 @@ mp_obj_t mp_pin_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, 
 }
 
 // fast method for getting/setting pin value
-STATIC mp_obj_t machine_pin_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+static mp_obj_t machine_pin_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     mp_arg_check_num(n_args, n_kw, 0, 1, false);
     machine_pin_obj_t *self = self_in;
     if (n_args == 0) {
@@ -166,33 +162,33 @@ STATIC mp_obj_t machine_pin_call(mp_obj_t self_in, size_t n_args, size_t n_kw, c
 }
 
 // pin.init(mode, pull)
-STATIC mp_obj_t machine_pin_obj_init(size_t n_args, const mp_obj_t *args, mp_map_t *kw_args) {
+static mp_obj_t machine_pin_obj_init(size_t n_args, const mp_obj_t *args, mp_map_t *kw_args) {
     return machine_pin_obj_init_helper(args[0], n_args - 1, args + 1, kw_args);
 }
 MP_DEFINE_CONST_FUN_OBJ_KW(machine_pin_init_obj, 1, machine_pin_obj_init);
 
 // pin.value([value])
-STATIC mp_obj_t machine_pin_value(size_t n_args, const mp_obj_t *args) {
+static mp_obj_t machine_pin_value(size_t n_args, const mp_obj_t *args) {
     return machine_pin_call(args[0], n_args - 1, 0, args + 1);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(machine_pin_value_obj, 1, 2, machine_pin_value);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(machine_pin_value_obj, 1, 2, machine_pin_value);
 
-STATIC mp_obj_t machine_pin_off(mp_obj_t self_in) {
+static mp_obj_t machine_pin_off(mp_obj_t self_in) {
     machine_pin_obj_t *self = self_in;
     (void)gpio_pin_set_raw(self->port, self->pin, 0);
     return mp_const_none;
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_1(machine_pin_off_obj, machine_pin_off);
+static MP_DEFINE_CONST_FUN_OBJ_1(machine_pin_off_obj, machine_pin_off);
 
-STATIC mp_obj_t machine_pin_on(mp_obj_t self_in) {
+static mp_obj_t machine_pin_on(mp_obj_t self_in) {
     machine_pin_obj_t *self = self_in;
     (void)gpio_pin_set_raw(self->port, self->pin, 1);
     return mp_const_none;
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_1(machine_pin_on_obj, machine_pin_on);
+static MP_DEFINE_CONST_FUN_OBJ_1(machine_pin_on_obj, machine_pin_on);
 
 // pin.irq(handler=None, trigger=IRQ_FALLING|IRQ_RISING, hard=False)
-STATIC mp_obj_t machine_pin_irq(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+static mp_obj_t machine_pin_irq(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
     enum { ARG_handler, ARG_trigger, ARG_hard };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_handler, MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
@@ -245,9 +241,9 @@ STATIC mp_obj_t machine_pin_irq(size_t n_args, const mp_obj_t *pos_args, mp_map_
 
     return MP_OBJ_FROM_PTR(self->irq);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_KW(machine_pin_irq_obj, 1, machine_pin_irq);
+static MP_DEFINE_CONST_FUN_OBJ_KW(machine_pin_irq_obj, 1, machine_pin_irq);
 
-STATIC mp_uint_t machine_pin_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t arg, int *errcode) {
+static mp_uint_t machine_pin_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_t arg, int *errcode) {
     (void)errcode;
     machine_pin_obj_t *self = self_in;
 
@@ -262,7 +258,7 @@ STATIC mp_uint_t machine_pin_ioctl(mp_obj_t self_in, mp_uint_t request, uintptr_
     return -1;
 }
 
-STATIC const mp_rom_map_elem_t machine_pin_locals_dict_table[] = {
+static const mp_rom_map_elem_t machine_pin_locals_dict_table[] = {
     // instance methods
     { MP_ROM_QSTR(MP_QSTR_init),    MP_ROM_PTR(&machine_pin_init_obj) },
     { MP_ROM_QSTR(MP_QSTR_value),   MP_ROM_PTR(&machine_pin_value_obj) },
@@ -272,16 +268,17 @@ STATIC const mp_rom_map_elem_t machine_pin_locals_dict_table[] = {
 
     // class constants
     { MP_ROM_QSTR(MP_QSTR_IN),        MP_ROM_INT(GPIO_INPUT) },
-    { MP_ROM_QSTR(MP_QSTR_OUT),       MP_ROM_INT(GPIO_OUTPUT) },
+    { MP_ROM_QSTR(MP_QSTR_OUT),       MP_ROM_INT(GPIO_OUTPUT | GPIO_INPUT) },
+    { MP_ROM_QSTR(MP_QSTR_OPEN_DRAIN), MP_ROM_INT(GPIO_OUTPUT | GPIO_INPUT | GPIO_OPEN_DRAIN) },
     { MP_ROM_QSTR(MP_QSTR_PULL_UP),   MP_ROM_INT(GPIO_PULL_UP) },
     { MP_ROM_QSTR(MP_QSTR_PULL_DOWN), MP_ROM_INT(GPIO_PULL_DOWN) },
     { MP_ROM_QSTR(MP_QSTR_IRQ_RISING), MP_ROM_INT(GPIO_INT_EDGE_RISING) },
     { MP_ROM_QSTR(MP_QSTR_IRQ_FALLING), MP_ROM_INT(GPIO_INT_EDGE_FALLING) },
 };
 
-STATIC MP_DEFINE_CONST_DICT(machine_pin_locals_dict, machine_pin_locals_dict_table);
+static MP_DEFINE_CONST_DICT(machine_pin_locals_dict, machine_pin_locals_dict_table);
 
-STATIC const mp_pin_p_t machine_pin_pin_p = {
+static const mp_pin_p_t machine_pin_pin_p = {
     .ioctl = machine_pin_ioctl,
 };
 
@@ -296,7 +293,7 @@ MP_DEFINE_CONST_OBJ_TYPE(
     locals_dict, &machine_pin_locals_dict
     );
 
-STATIC mp_uint_t machine_pin_irq_trigger(mp_obj_t self_in, mp_uint_t new_trigger) {
+static mp_uint_t machine_pin_irq_trigger(mp_obj_t self_in, mp_uint_t new_trigger) {
     machine_pin_obj_t *self = MP_OBJ_TO_PTR(self_in);
     if (new_trigger == 0) {
         new_trigger = GPIO_INT_DISABLE;
@@ -308,7 +305,7 @@ STATIC mp_uint_t machine_pin_irq_trigger(mp_obj_t self_in, mp_uint_t new_trigger
     return 0;
 }
 
-STATIC mp_uint_t machine_pin_irq_info(mp_obj_t self_in, mp_uint_t info_type) {
+static mp_uint_t machine_pin_irq_info(mp_obj_t self_in, mp_uint_t info_type) {
     machine_pin_obj_t *self = MP_OBJ_TO_PTR(self_in);
     if (info_type == MP_IRQ_INFO_FLAGS) {
         return gpio_get_pending_int(self->port);
@@ -318,7 +315,7 @@ STATIC mp_uint_t machine_pin_irq_info(mp_obj_t self_in, mp_uint_t info_type) {
     return 0;
 }
 
-STATIC const mp_irq_methods_t machine_pin_irq_methods = {
+static const mp_irq_methods_t machine_pin_irq_methods = {
     .trigger = machine_pin_irq_trigger,
     .info = machine_pin_irq_info,
 };

@@ -31,19 +31,22 @@
 
 #include "py/nlr.h"
 #include "py/mperrno.h"
+#include "py/mphal.h"
 #include "py/lexer.h"
 #include "py/parse.h"
 #include "py/obj.h"
 #include "py/runtime.h"
-#include "py/stackctrl.h"
 #include "py/gc.h"
 #include "py/compile.h"
+#include "py/persistentcode.h"
+#include "extmod/misc.h"
+#include "extmod/modmachine.h"
 #include "shared/runtime/pyexec.h"
 #include "readline.h"
 #include "gccollect.h"
 #include "modmachine.h"
 #include "modmusic.h"
-#include "modules/uos/microbitfs.h"
+#include "modules/os/microbitfs.h"
 #include "led.h"
 #include "uart.h"
 #include "nrf.h"
@@ -52,7 +55,6 @@
 #include "i2c.h"
 #include "adc.h"
 #include "rtcounter.h"
-#include "mphalport.h"
 
 #if MICROPY_PY_MACHINE_HW_PWM
 #include "pwm.h"
@@ -72,7 +74,7 @@
 #include "softpwm.h"
 #endif
 
-#if MICROPY_HW_USB_CDC
+#if MICROPY_HW_ENABLE_USBDEV && MICROPY_HW_USB_CDC
 #include "usb_cdc.h"
 #endif
 
@@ -106,7 +108,7 @@ void do_str(const char *src, mp_parse_input_kind_t input_kind) {
 extern uint32_t _heap_start;
 extern uint32_t _heap_end;
 
-int main(int argc, char **argv) {
+void MP_NORETURN _start(void) {
     // Hook for a board to run code at start up, for example check if a
     // bootloader should be entered instead of the main application.
     MICROPY_BOARD_STARTUP();
@@ -123,11 +125,7 @@ soft_reset:
 
     led_state(1, 1); // MICROPY_HW_LED_1 aka MICROPY_HW_LED_RED
 
-    mp_stack_set_top(&_ram_end);
-
-    // Stack limit should be less than real stack size, so we have a chance
-    // to recover from limit hit.  (Limit is measured in bytes.)
-    mp_stack_set_limit((char *)&_ram_end - (char *)&_heap_end - 400);
+    mp_cstack_init_with_top(&_ram_end, (char *)&_ram_end - (char *)&_heap_end);
 
     machine_init();
 
@@ -136,7 +134,7 @@ soft_reset:
     mp_init();
     readline_init0();
 
-    #if MICROPY_PY_MACHINE_HW_SPI
+    #if MICROPY_PY_MACHINE_SPI
     spi_init0();
     #endif
 
@@ -164,13 +162,14 @@ soft_reset:
     uart_init0();
     #endif
 
-    #if (MICROPY_PY_BLE_NUS == 0) && (MICROPY_HW_USB_CDC == 0)
+    #if MICROPY_HW_ENABLE_UART_REPL
     {
         mp_obj_t args[2] = {
-            MP_OBJ_NEW_SMALL_INT(0),
-            MP_OBJ_NEW_SMALL_INT(115200),
+            MP_OBJ_NEW_SMALL_INT(MICROPY_HW_UART_REPL),
+            MP_OBJ_NEW_SMALL_INT(MICROPY_HW_UART_REPL_BAUD),
         };
-        MP_STATE_PORT(board_stdio_uart) = MP_OBJ_TYPE_GET_SLOT(&machine_uart_type, make_new)((mp_obj_t)&machine_uart_type, MP_ARRAY_SIZE(args), 0, args);
+        mp_obj_t uart = MP_OBJ_TYPE_GET_SLOT(&machine_uart_type, make_new)((mp_obj_t)&machine_uart_type, MP_ARRAY_SIZE(args), 0, args);
+        mp_os_dupterm_obj.fun.var(1, &uart);
     }
     #endif
 
@@ -178,19 +177,8 @@ soft_reset:
 
     #if MICROPY_HW_ENABLE_INTERNAL_FLASH_STORAGE
     flashbdev_init();
-
-    // Try to mount the flash on "/flash" and chdir to it for the boot-up directory.
-    mp_obj_t mount_point = MP_OBJ_NEW_QSTR(MP_QSTR__slash_flash);
-    int ret = mp_vfs_mount_and_chdir_protected((mp_obj_t)&nrf_flash_obj, mount_point);
-
-    if ((ret == -MP_ENODEV) || (ret == -MP_EIO)) {
-        pyexec_frozen_module("_mkfs.py", false); // Frozen script for formatting flash filesystem.
-        ret = mp_vfs_mount_and_chdir_protected((mp_obj_t)&nrf_flash_obj, mount_point);
-    }
-
-    if (ret != 0) {
-        printf("MPY: can't mount flash\n");
-    }
+    // Execute _boot.py to set up the filesystem.
+    pyexec_frozen_module("_boot.py", false);
     #endif
 
     #if MICROPY_MBFS
@@ -257,14 +245,18 @@ soft_reset:
 
     led_state(1, 0);
 
-    #if MICROPY_HW_USB_CDC
+    #if MICROPY_VFS || MICROPY_MBFS || MICROPY_MODULE_FROZEN
+    ret_code = pyexec_file_if_exists("boot.py");
+    #endif
+
+    #if MICROPY_HW_ENABLE_USBDEV && MICROPY_HW_USB_CDC
     usb_cdc_init();
     #endif
 
     #if MICROPY_VFS || MICROPY_MBFS || MICROPY_MODULE_FROZEN
-    // run boot.py and main.py if they exist.
-    pyexec_file_if_exists("boot.py");
-    pyexec_file_if_exists("main.py");
+    if (pyexec_mode_kind == PYEXEC_MODE_FRIENDLY_REPL && ret_code != 0) {
+        pyexec_file_if_exists("main.py");
+    }
     #endif
 
     for (;;) {
@@ -293,40 +285,33 @@ soft_reset:
     #endif
 
     goto soft_reset;
-
-    return 0;
 }
 
 #if !MICROPY_VFS
 #if MICROPY_MBFS
 // Use micro:bit filesystem
-mp_lexer_t *mp_lexer_new_from_file(const char *filename) {
-    return uos_mbfs_new_reader(filename);
+mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
+    return os_mbfs_new_reader(qstr_str(filename));
 }
 
 mp_import_stat_t mp_import_stat(const char *path) {
-    return uos_mbfs_import_stat(path);
+    return os_mbfs_import_stat(path);
 }
 
 mp_obj_t mp_builtin_open(size_t n_args, const mp_obj_t *args, mp_map_t *kwargs) {
-    return uos_mbfs_open(n_args, args);
+    return os_mbfs_open(n_args, args);
 }
 MP_DEFINE_CONST_FUN_OBJ_KW(mp_builtin_open_obj, 1, mp_builtin_open);
 
 #else
 // use dummy functions - no filesystem available
-mp_lexer_t *mp_lexer_new_from_file(const char *filename) {
+mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
     mp_raise_OSError(MP_ENOENT);
 }
 
 mp_import_stat_t mp_import_stat(const char *path) {
     return MP_IMPORT_STAT_NO_EXIST;
 }
-
-mp_obj_t mp_builtin_open(size_t n_args, const mp_obj_t *args, mp_map_t *kwargs) {
-    mp_raise_OSError(MP_EPERM);
-}
-MP_DEFINE_CONST_FUN_OBJ_KW(mp_builtin_open_obj, 1, mp_builtin_open);
 #endif
 #endif
 
@@ -347,7 +332,7 @@ void HardFault_Handler(void) {
     #endif
 }
 
-void NORETURN __fatal_error(const char *msg) {
+void MP_NORETURN __fatal_error(const char *msg) {
     while (1) {
         ;
     }
@@ -364,6 +349,15 @@ void MP_WEAK __assert_func(const char *file, int line, const char *func, const c
     __fatal_error("Assertion failed");
 }
 
-void _start(void) {
-    main(0, NULL);
+#if MICROPY_EMIT_INLINE_THUMB || MICROPY_ENABLE_NATIVE_CODE
+void *nrf_native_code_commit(void *buf, unsigned int len, void *reloc) {
+    (void)len;
+    if (reloc) {
+        // Native code in RAM must execute from the IRAM region at 0x00800000, and so relocations
+        // to text must also point to this region.  The MICROPY_MAKE_POINTER_CALLABLE macro will
+        // adjust the `buf` address from RAM to IRAM.
+        mp_native_relocate(reloc, buf, (uintptr_t)MICROPY_MAKE_POINTER_CALLABLE(buf) & ~1);
+    }
+    return buf;
 }
+#endif

@@ -4,13 +4,13 @@ ifdef BOARD_DIR
 # the path as the board name.
 BOARD ?= $(notdir $(BOARD_DIR:/=))
 else
-# If not given on the command line, then default to pca10040.
-BOARD ?= pca10040
+# If not given on the command line, then default to PCA10040.
+BOARD ?= PCA10040
 BOARD_DIR ?= boards/$(BOARD)
 endif
 
-ifeq ($(wildcard boards/$(BOARD)/.),)
-$(error Invalid BOARD specified)
+ifeq ($(wildcard $(BOARD_DIR)/.),)
+$(error Invalid BOARD specified: $(BOARD_DIR))
 endif
 
 # If SoftDevice is selected, try to use that one.
@@ -19,7 +19,7 @@ SD_LOWER = $(shell echo $(SD) | tr '[:upper:]' '[:lower:]')
 
 # TODO: Verify that it is a valid target.
 
-include boards/$(BOARD)/mpconfigboard.mk
+include $(BOARD_DIR)/mpconfigboard.mk
 
 ifeq ($(SD), )
 	# If the build directory is not given, make it reflect the board name.
@@ -48,23 +48,30 @@ ifneq ($(LD_FILE),)
 	LD_FILES = $(LD_FILE)
 endif
 
--include boards/$(BOARD)/modules/boardmodules.mk
+-include $(BOARD_DIR)/modules/boardmodules.mk
 
 # qstr definitions (must come before including py.mk)
-QSTR_DEFS = qstrdefsport.h $(GEN_PINS_QSTR)
+QSTR_DEFS = qstrdefsport.h
 
 # MicroPython feature configurations
 ifeq ($(DEBUG), 0)
 MICROPY_ROM_TEXT_COMPRESSION ?= 1
 endif
 
-FROZEN_MANIFEST ?= modules/manifest.py
+# Enable asyncio by default and select appropriate manifest.
+MICROPY_PY_ASYNCIO ?= 1
+ifeq ($(MICROPY_PY_ASYNCIO),1)
+FROZEN_MANIFEST ?= boards/manifest.py
+else
+FROZEN_MANIFEST ?= boards/manifest_minimal.py
+endif
+CFLAGS += -DMICROPY_PY_ASYNCIO=$(MICROPY_PY_ASYNCIO)
 
 # include py core make definitions
 include ../../py/py.mk
 include ../../extmod/extmod.mk
 
-GIT_SUBMODULES += lib/nrfx lib/tinyusb
+GIT_SUBMODULES += lib/CMSIS_6 lib/nrfx lib/tinyusb
 
 MICROPY_VFS_FAT ?= 0
 
@@ -73,22 +80,25 @@ CROSS_COMPILE ?= arm-none-eabi-
 INC += -I.
 INC += -I../..
 INC += -I$(BUILD)
-INC += -I./../../lib/cmsis/inc
+INC += -I./../../lib/CMSIS_6/CMSIS/Core/Include
 INC += -I./modules/machine
 INC += -I./modules/ubluepy
 INC += -I./modules/music
 INC += -I./modules/ble
 INC += -I./modules/board
 INC += -I./modules/nrf
-INC += -I../../shared/readline
-INC += -I./drivers/bluetooth
 INC += -I./drivers
+INC += -I./drivers/bluetooth
+INC += -I./drivers/usb
 INC += -I../../lib/nrfx/
 INC += -I../../lib/nrfx/drivers
 INC += -I../../lib/nrfx/drivers/include
 INC += -I../../lib/nrfx/mdk
 INC += -I../../lib/nrfx/hal
+INC += -I../../lib/nrfx/haly
+INC += -I../../lib/nrfx/helpers
 INC += -I../../lib/nrfx/drivers/src/
+INC += -I../../shared/readline
 
 MCU_VARIANT_UPPER = $(shell echo $(MCU_VARIANT) | tr '[:lower:]' '[:upper:]')
 MCU_SUB_VARIANT_UPPER = $(shell echo $(MCU_SUB_VARIANT) | tr '[:lower:]' '[:upper:]')
@@ -98,6 +108,7 @@ SYSTEM_C_SRC :=
 ifeq ($(MCU_SUB_VARIANT),nrf51822)
 	SYSTEM_C_SRC += $(addprefix lib/nrfx/mdk/, system_nrf51.c)
         NRF_DEFINES += -D$(MCU_VARIANT_UPPER)
+        NRF_DEFINES += -DNRF51822_XXAA
 else ifeq ($(MCU_SUB_VARIANT),nrf52832)
 	SYSTEM_C_SRC += $(addprefix lib/nrfx/mdk/, system_nrf52.c)
         NRF_DEFINES += -D$(MCU_VARIANT_UPPER)
@@ -113,14 +124,12 @@ NRF_DEFINES += -D$(MCU_SUB_VARIANT_UPPER)
 NRF_DEFINES += -DCONFIG_GPIO_AS_PINRESET
 
 MAKE_PINS = boards/make-pins.py
-BOARD_PINS = boards/$(BOARD)/pins.csv
+BOARD_PINS = $(BOARD_DIR)/pins.csv
 AF_FILE = $(MCU_VARIANT)_af.csv
 PREFIX_FILE = boards/$(MCU_VARIANT)_prefix.c
 GEN_PINS_SRC = $(BUILD)/pins_gen.c
 GEN_PINS_HDR = $(HEADER_BUILD)/pins.h
-GEN_PINS_QSTR = $(BUILD)/pins_qstr.h
 GEN_PINS_AF_CONST = $(HEADER_BUILD)/pins_af_const.h
-GEN_PINS_AF_PY = $(BUILD)/pins_af.py
 
 CFLAGS_CORTEX_M = -mthumb -mabi=aapcs -fsingle-precision-constant -Wdouble-promotion
 
@@ -131,6 +140,7 @@ CFLAGS_MCU_m4 = $(CFLAGS_CORTEX_M) -mtune=cortex-m4 -mcpu=cortex-m4 -mfpu=fpv4-s
 CFLAGS_MCU_m0 = $(CFLAGS_CORTEX_M) -fshort-enums -mtune=cortex-m0 -mcpu=cortex-m0 -mfloat-abi=soft
 
 LTO ?= 1
+
 ifeq ($(LTO),1)
 CFLAGS += -flto
 else
@@ -139,12 +149,12 @@ LDFLAGS += -Wl,--gc-sections
 endif
 
 CFLAGS += $(CFLAGS_MCU_$(MCU_SERIES))
-CFLAGS += $(INC) -Wall -Werror -ansi -std=c11 -nostdlib $(COPT) $(NRF_DEFINES) $(CFLAGS_EXTRA)
+CFLAGS += $(INC) -Wall -Werror -std=c11 $(COPT) $(NRF_DEFINES) $(CFLAGS_EXTRA)
 CFLAGS += -fno-strict-aliasing
-CFLAGS += -Iboards/$(BOARD)
+CFLAGS += -I$(BOARD_DIR)
 CFLAGS += -DNRF5_HAL_H='<$(MCU_VARIANT)_hal.h>'
 
-LDFLAGS += $(CFLAGS)
+LDFLAGS += $(CFLAGS) -nostdlib
 LDFLAGS += -Xlinker -Map=$(@:.elf=.map)
 LDFLAGS += -mthumb -mabi=aapcs $(addprefix -T,$(LD_FILES)) -L boards/
 
@@ -165,73 +175,17 @@ CFLAGS += -Os -DNDEBUG
 LDFLAGS += -Os
 endif
 
-LIBS = \
-
 ifeq ($(MCU_VARIANT), nrf52)
 
-SRC_LIB_C += $(addprefix lib/,\
-        libm/math.c \
-        libm/fmodf.c \
-        libm/nearbyintf.c \
-        libm/ef_sqrt.c \
-        libm/kf_rem_pio2.c \
-        libm/kf_sin.c \
-        libm/kf_cos.c \
-        libm/kf_tan.c \
-        libm/ef_rem_pio2.c \
-        libm/sf_sin.c \
-        libm/sf_cos.c \
-        libm/sf_tan.c \
-        libm/sf_frexp.c \
-        libm/sf_modf.c \
-        libm/sf_ldexp.c \
-        libm/asinfacosf.c \
-        libm/acoshf.c \
-        libm/asinhf.c \
-        libm/atanf.c \
-        libm/atan2f.c \
-        libm/atanhf.c \
-        libm/log1pf.c \
-        libm/sf_erf.c \
-        libm/erf_lgamma.c \
-        libm/wf_lgamma.c \
-        libm/wf_tgamma.c \
-        libm/roundf.c \
-	)
+SRC_LIB_C += $(SRC_LIB_LIBM_C)
+SRC_LIB_C += $(SRC_LIB_LIBM_SQRT_SW_C)
 
 endif
 
 ifeq ($(MCU_VARIANT), nrf91)
 
-SRC_LIB_C += $(addprefix lib/,\
-        libm/math.c \
-        libm/fmodf.c \
-        libm/nearbyintf.c \
-        libm/ef_sqrt.c \
-        libm/kf_rem_pio2.c \
-        libm/kf_sin.c \
-        libm/kf_cos.c \
-        libm/kf_tan.c \
-        libm/ef_rem_pio2.c \
-        libm/sf_sin.c \
-        libm/sf_cos.c \
-        libm/sf_tan.c \
-        libm/sf_frexp.c \
-        libm/sf_modf.c \
-        libm/sf_ldexp.c \
-        libm/asinfacosf.c \
-        libm/acoshf.c \
-        libm/asinhf.c \
-        libm/atanf.c \
-        libm/atan2f.c \
-        libm/atanhf.c \
-        libm/log1pf.c \
-        libm/sf_erf.c \
-        libm/erf_lgamma.c \
-        libm/wf_lgamma.c \
-        libm/wf_tgamma.c \
-        libm/roundf.c \
-        )
+SRC_LIB_C += $(SRC_LIB_LIBM_C)
+SRC_LIB_C += $(SRC_LIB_LIBM_SQRT_SW_C)
 
 include drivers/secureboot/secureboot.mk
 
@@ -240,10 +194,14 @@ endif
 SRC_SHARED_C += $(addprefix shared/,\
 	libc/string0.c \
 	readline/readline.c \
+	runtime/mpirq.c \
 	runtime/pyexec.c \
+	runtime/stdout_helpers.c \
 	runtime/sys_stdio_mphal.c \
 	runtime/interrupt_char.c \
-	tinyusb/mp_cdc_common.c \
+	tinyusb/mp_usbd.c \
+	tinyusb/mp_usbd_cdc.c \
+	tinyusb/mp_usbd_descriptor.c \
 	timeutils/timeutils.c \
 	)
 
@@ -258,13 +216,13 @@ endif
 SRC_NRFX += $(addprefix lib/nrfx/drivers/src/,\
 	prs/nrfx_prs.c \
 	nrfx_uart.c \
-        nrfx_uarte.c \
+	nrfx_uarte.c \
 	nrfx_adc.c \
 	nrfx_saadc.c \
 	nrfx_temp.c \
 	nrfx_rng.c \
 	nrfx_twi.c \
-        nrfx_twim.c \
+	nrfx_twim.c \
 	nrfx_spi.c \
 	nrfx_spim.c \
 	nrfx_rtc.c \
@@ -275,6 +233,10 @@ SRC_NRFX += $(addprefix lib/nrfx/drivers/src/,\
 	nrfx_power.c \
 	nrfx_clock.c \
 	)
+
+SRC_NRFX += \
+	lib/nrfx/soc/nrfx_atomic.c \
+	lib/nrfx/helpers/nrfx_flag32_allocator.c
 
 SRC_C += \
 	main.c \
@@ -292,10 +254,9 @@ SRC_C += \
 	$(wildcard $(BOARD_DIR)/*.c) \
 
 ifeq ($(MCU_SUB_VARIANT), nrf52840)
+# Add support for USB using TinyUSB.
 
-INC += -I./drivers/usb
 INC += -I../../lib/tinyusb/src
-
 
 # If SoftDevice is selected.
 ifneq ($(SD), )
@@ -303,34 +264,25 @@ ifneq ($(SD), )
 CFLAGS += -DSOFTDEVICE_PRESENT
 endif
 
-SRC_C += $(addprefix drivers/usb/,\
-	usb_cdc.c \
-	usb_descriptors.c \
-	)
+SRC_C += drivers/usb/usb_cdc.c
 
-SRC_C += $(addprefix lib/tinyusb/src/,\
-	common/tusb_fifo.c \
-	device/usbd.c \
-	device/usbd_control.c \
-	class/cdc/cdc_device.c \
-	tusb.c \
-	portable/nordic/nrf5x/dcd_nrf5x.c \
-	)
+# TinyUSB Stack source
+-include $(TOP)/lib/tinyusb/src/tinyusb.mk
+TINYUSB_SRC_C := $(sort $(addprefix lib/tinyusb/, \
+	$(TINYUSB_SRC_C) \
+	src/portable/nordic/nrf5x/dcd_nrf5x.c \
+	))
 
 endif
 
 DRIVERS_SRC_C += $(addprefix modules/,\
-	machine/modmachine.c \
-	machine/uart.c \
 	machine/spi.c \
 	machine/i2c.c \
-	machine/adc.c \
 	machine/pin.c \
 	machine/timer.c \
 	machine/rtcounter.c \
 	machine/temp.c \
-	uos/moduos.c \
-	uos/microbitfs.c \
+	os/microbitfs.c \
 	board/modboard.c \
 	board/led.c \
 	ubluepy/modubluepy.c \
@@ -366,6 +318,7 @@ OBJ += $(addprefix $(BUILD)/, $(DRIVERS_SRC_C:.c=.o))
 OBJ += $(addprefix $(BUILD)/, $(SYSTEM_C_SRC:.c=.o))
 OBJ += $(addprefix $(BUILD)/, $(SRC_LIB_C:.c=.o))
 OBJ += $(addprefix $(BUILD)/, $(SRC_SHARED_C:.c=.o))
+OBJ += $(addprefix $(BUILD)/, $(TINYUSB_SRC_C:.c=.o))
 OBJ += $(GEN_PINS_SRC:.c=.o)
 
 $(BUILD)/$(OOFATFS_DIR)/ff.o: COPT += -Os
@@ -393,9 +346,9 @@ hex: $(BUILD)/$(OUTPUT_FILENAME).hex
 $(BUILD)/$(OUTPUT_FILENAME).hex: $(BUILD)/$(OUTPUT_FILENAME).elf
 	$(OBJCOPY) -O ihex $< $@
 
-FLASHER ?=
+FLASHER ?= jlink
 
-ifeq ($(FLASHER),)
+ifeq ($(FLASHER), jlink)
 
 ifeq ($(MCU_VARIANT), nrf91)
 
@@ -503,12 +456,12 @@ sd: nrfutil_dfu_sd nrfutil_dfu_deploy
 
 nrfutil_dfu_sd: $(BUILD)/$(OUTPUT_FILENAME).hex
 	$(Q)hexmerge.py -o $(BUILD)/stripped_sd.hex --range=0x1000: $(SOFTDEV_HEX)
-	$(Q)nrfutil pkg generate --hw-version 52 --sd-req 0x00 --sd-id 0x00 --softdevice $(BUILD)/stripped_sd.hex $(BUILD)/stripped_sd.zip
-	$(Q)nrfutil dfu usb-serial -pkg $(BUILD)/stripped_sd.zip -p $(NRFUTIL_PORT) -t 0
+	$(Q)nrfutil nrf5sdk-tools pkg generate --hw-version 52 --sd-req 0x00 --sd-id 0x00 --softdevice $(BUILD)/stripped_sd.hex $(BUILD)/stripped_sd.zip
+	$(Q)nrfutil nrf5sdk-tools dfu usb-serial -pkg $(BUILD)/stripped_sd.zip -p $(NRFUTIL_PORT) -t 0
 
 nrfutil_dfu_deploy: $(BUILD)/$(OUTPUT_FILENAME).hex
-	$(Q)nrfutil pkg generate --hw-version 52 --sd-req $(NRFUTIL_SD_REQ) --application-version 1 --application $(BUILD)/$(OUTPUT_FILENAME).hex $(BUILD)/$(OUTPUT_FILENAME)_dfu.zip
-	$(Q)nrfutil dfu usb-serial -pkg $(BUILD)/$(OUTPUT_FILENAME)_dfu.zip -p $(NRFUTIL_PORT) -t 0
+	$(Q)nrfutil nrf5sdk-tools pkg generate --hw-version 52 --sd-req $(NRFUTIL_SD_REQ) --application-version 1 --application $(BUILD)/$(OUTPUT_FILENAME).hex $(BUILD)/$(OUTPUT_FILENAME)_dfu.zip
+	$(Q)nrfutil nrf5sdk-tools dfu usb-serial -pkg $(BUILD)/$(OUTPUT_FILENAME)_dfu.zip -p $(NRFUTIL_PORT) -t 0
 
 deploy: nrfutil_dfu_deploy
 
@@ -530,13 +483,9 @@ $(BUILD)/$(OUTPUT_FILENAME).elf: $(OBJ)
 	$(Q)$(SIZE) $@
 
 # List of sources for qstr extraction
-SRC_QSTR += $(SRC_C) $(SRC_SHARED_C) $(DRIVERS_SRC_C) $(SRC_BOARD_MODULES)
+SRC_QSTR += $(SRC_C) $(SRC_SHARED_C) $(DRIVERS_SRC_C) $(SRC_BOARD_MODULES) $(GEN_PINS_SRC)
 
-# Append any auto-generated sources that are needed by sources listed in
-# SRC_QSTR
-SRC_QSTR_AUTO_DEPS +=
-
-# Making OBJ use an order-only depenedency on the generated pins.h file
+# Making OBJ use an order-only dependency on the generated pins.h file
 # has the side effect of making the pins.h file before we actually compile
 # any of the objects. The normal dependency generation will deal with the
 # case when pins.h is modified. But when it doesn't exist, we don't know
@@ -545,18 +494,10 @@ $(OBJ): | $(HEADER_BUILD)/pins.h
 
 # Use a pattern rule here so that make will only call make-pins.py once to make
 # both pins_gen.c and pins.h
-$(BUILD)/%_gen.c $(HEADER_BUILD)/%.h $(HEADER_BUILD)/%_af_const.h $(BUILD)/%_qstr.h: boards/$(BOARD)/%.csv $(MAKE_PINS) $(AF_FILE) $(PREFIX_FILE) | $(HEADER_BUILD)
+$(BUILD)/%_gen.c $(HEADER_BUILD)/%.h $(HEADER_BUILD)/%_af_const.h: $(BOARD_DIR)/%.csv $(MAKE_PINS) $(AF_FILE) $(PREFIX_FILE) | $(HEADER_BUILD)
 	$(ECHO) "Create $@"
-	$(Q)$(PYTHON) $(MAKE_PINS) --board $(BOARD_PINS) --af $(AF_FILE) --prefix $(PREFIX_FILE) --hdr $(GEN_PINS_HDR) --qstr $(GEN_PINS_QSTR) --af-const $(GEN_PINS_AF_CONST) --af-py $(GEN_PINS_AF_PY) > $(GEN_PINS_SRC)
-
-$(GEN_PINS_SRC:.c=.o): $(GEN_PINS_SRC)
-	$(call compile_c)
-
-ifneq ($(FROZEN_MANIFEST),)
-CFLAGS += -DMICROPY_QSTR_EXTRA_POOL=mp_qstr_frozen_const_pool
-CFLAGS += -DMICROPY_MODULE_FROZEN_MPY
-CFLAGS += -DMICROPY_MODULE_FROZEN_STR
-endif
+	$(Q)$(PYTHON) $(MAKE_PINS) --board-csv $(BOARD_PINS) --af-csv $(AF_FILE) --prefix $(PREFIX_FILE) \
+	    --output-source $(GEN_PINS_SRC) --output-header $(GEN_PINS_HDR) --output-af-const $(GEN_PINS_AF_CONST)
 
 $(PY_BUILD)/nlr%.o: CFLAGS += -Os -fno-lto
 

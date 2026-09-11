@@ -27,7 +27,19 @@
 #include "user_interface.h"
 #include "py/ringbuf.h"
 #include "shared/runtime/interrupt_char.h"
+#include "ets_alt_task.h"
 #include "xtirq.h"
+
+#define MICROPY_BEGIN_ATOMIC_SECTION() esp_disable_irq()
+#define MICROPY_END_ATOMIC_SECTION(state) esp_enable_irq(state)
+
+// During machine.time_pulse_us, feed WDT every now and then.
+#define MICROPY_PY_MACHINE_TIME_PULSE_US_HOOK(dt) \
+    do { \
+        if ((dt & 0xffff) == 0xffff && !ets_loop_dont_feed_sw_wdt) { \
+            system_soft_wdt_feed(); \
+        } \
+    } while (0)
 
 void mp_sched_keyboard_interrupt(void);
 
@@ -38,8 +50,6 @@ extern const struct _mp_print_t mp_debug_print;
 extern ringbuf_t stdin_ringbuf;
 // Call this after putting data to stdin_ringbuf
 void mp_hal_signal_input(void);
-// Call this when data is available in dupterm object
-void mp_hal_signal_dupterm_input(void);
 
 // This variable counts how many times the UART is attached to dupterm
 extern int uart_attached_to_dupterm;
@@ -47,27 +57,25 @@ extern int uart_attached_to_dupterm;
 void mp_hal_init(void);
 void mp_hal_rtc_init(void);
 
-__attribute__((always_inline)) static inline uint32_t mp_hal_ticks_us(void) {
+__attribute__((always_inline)) static inline mp_uint_t mp_hal_ticks_us(void) {
     return system_get_time();
 }
 
-__attribute__((always_inline)) static inline uint32_t mp_hal_ticks_cpu(void) {
+__attribute__((always_inline)) static inline mp_uint_t mp_hal_ticks_cpu(void) {
     uint32_t ccount;
     __asm__ __volatile__ ("rsr %0,ccount" : "=a" (ccount));
-    return ccount;
+    return (mp_uint_t)ccount;
 }
 
-void mp_hal_delay_us(uint32_t);
+void mp_hal_delay_us(mp_uint_t);
 void mp_hal_set_interrupt_char(int c);
 uint32_t mp_hal_get_cpu_freq(void);
 
 #define UART_TASK_ID 0
-#define DUPTERM_TASK_ID 1
 void uart_task_init();
-void dupterm_task_init();
 
-void ets_event_poll(void);
-#define ETS_POLL_WHILE(cond) { while (cond) ets_event_poll(); }
+uint32_t esp_disable_irq(void);
+void esp_enable_irq(uint32_t state);
 
 // needed for machine.I2C
 #include "osapi.h"
@@ -101,7 +109,16 @@ void mp_hal_pin_open_drain(mp_hal_pin_obj_t pin);
         else { gpio_output_set(1 << (p), 0, 1 << (p), 0); } \
 } while (0)
 #define mp_hal_pin_read(p) pin_get(p)
+static inline int mp_hal_pin_read_output(mp_hal_pin_obj_t pin) {
+    if (pin >= 16) {
+        return READ_PERI_REG(RTC_GPIO_OUT) & 1;
+    } else {
+        return (GPIO_REG_READ(GPIO_OUT_ADDRESS) >> pin) & 1;
+    }
+}
 #define mp_hal_pin_write(p, v) pin_set((p), (v))
 
 void *ets_get_esf_buf_ctlblk(void);
 int ets_esf_free_bufs(int idx);
+
+void mp_hal_get_random(size_t n, uint8_t *buf);

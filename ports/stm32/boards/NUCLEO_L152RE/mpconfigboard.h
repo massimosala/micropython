@@ -7,11 +7,12 @@
 #define MICROPY_HW_RTC_USE_LSE      (1)
 #define MICROPY_HW_ENABLE_SERVO     (1)
 #define MICROPY_HW_ENABLE_DAC       (1)
+#define MICROPY_HW_ENABLE_USB       (0)
 
 // HSE is 8MHz, HSI is 16MHz CPU freq set to 32MHz
 // Default source for the clock is HSI.
 // For revisions of the board greater than C-01, HSE can be used as a
-// clock source by removing the #define MICROPY_HW_CLK_USE_HSE line
+// clock source by removing the #define MICROPY_HW_CLK_USE_HSI line
 #define MICROPY_HW_CLK_USE_HSI (1)
 
 #if MICROPY_HW_CLK_USE_HSI
@@ -20,6 +21,8 @@
 #else
 #define MICROPY_HW_CLK_PLLMUL (RCC_CFGR_PLLMUL12)
 #define MICROPY_HW_CLK_PLLDIV (RCC_CFGR_PLLDIV3)
+// HSE comes from ST-LINK 8MHz, not crystal.
+#define MICROPY_HW_CLK_USE_BYPASS (1)
 #endif
 
 // UART config
@@ -72,3 +75,11 @@
 #define MICROPY_HW_LED_OFF(pin)     (mp_hal_pin_low(pin))
 
 #define MICROPY_HW_FLASH_LATENCY FLASH_LATENCY_1
+
+// USB config
+#if MICROPY_HW_ENABLE_USB
+#if MICROPY_HW_CLK_USE_HSI
+#error STM32L152RE cannot use USB feature with HSI clock. Use HSE.
+#endif
+#define MICROPY_HW_USB_FS (1)
+#endif

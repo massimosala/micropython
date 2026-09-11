@@ -55,7 +55,7 @@ void readline_init0(void) {
     memset(MP_STATE_PORT(readline_hist), 0, MICROPY_READLINE_HISTORY_SIZE * sizeof(const char*));
 }
 
-STATIC char *str_dup_maybe(const char *str) {
+static char *str_dup_maybe(const char *str) {
     uint32_t len = strlen(str);
     char *s2 = m_new_maybe(char, len + 1);
     if (s2 == NULL) {
@@ -72,7 +72,7 @@ STATIC char *str_dup_maybe(const char *str) {
 
 // ...and provide the implementation using them
 #if MICROPY_HAL_HAS_VT100
-STATIC void mp_hal_move_cursor_back(uint pos) {
+static void mp_hal_move_cursor_back(uint pos) {
     if (pos <= 4) {
         // fast path for most common case of 1 step back
         mp_hal_stdout_tx_strn("\b\b\b\b", pos);
@@ -88,7 +88,7 @@ STATIC void mp_hal_move_cursor_back(uint pos) {
     }
 }
 
-STATIC void mp_hal_erase_line_from_cursor(uint n_chars_to_erase) {
+static void mp_hal_erase_line_from_cursor(uint n_chars_to_erase) {
     (void)n_chars_to_erase;
     mp_hal_stdout_tx_strn("\x1b[K", 3);
 }
@@ -101,16 +101,17 @@ typedef struct _readline_t {
     int hist_cur;
     size_t cursor_pos;
     char escape_seq_buf[1];
+    char last_nl;
     #if MICROPY_REPL_AUTO_INDENT
     uint8_t auto_indent_state;
     #endif
     const char *prompt;
 } readline_t;
 
-STATIC readline_t rl;
+static readline_t rl;
 
 #if MICROPY_REPL_EMACS_WORDS_MOVE
-STATIC size_t cursor_count_word(int forward) {
+static size_t cursor_count_word(int forward) {
     const char *line_buf = vstr_str(rl.line);
     size_t pos = rl.cursor_pos;
     bool in_word = false;
@@ -137,6 +138,17 @@ STATIC size_t cursor_count_word(int forward) {
     return forward ? pos - rl.cursor_pos : rl.cursor_pos - pos;
 }
 #endif
+
+// Function returns true if newline character shall be processed.
+static bool process_nl(int c) {
+    if ((c == '\r' || c == '\n') && (rl.last_nl == 0 || rl.last_nl == c)) {
+        rl.last_nl = c;
+        return true;
+    }
+
+    rl.last_nl = 0;
+    return false;
+}
 
 int readline_process_char(int c) {
     size_t last_line_len = rl.line->len;
@@ -192,7 +204,7 @@ int readline_process_char(int c) {
         } else if (c == CHAR_CTRL_W) {
             goto backward_kill_word;
         #endif
-        } else if (c == '\r') {
+        } else if (process_nl(c)) {
             // newline
             mp_hal_stdout_tx_str("\r\n");
             readline_push_history(vstr_null_terminated_str(rl.line) + rl.orig_line_len);
@@ -481,7 +493,7 @@ redraw:
 }
 
 #if MICROPY_REPL_AUTO_INDENT
-STATIC void readline_auto_indent(void) {
+static void readline_auto_indent(void) {
     if (!(rl.auto_indent_state & AUTO_INDENT_ENABLED)) {
         return;
     }

@@ -1,23 +1,22 @@
 # test importing of .mpy files with native code
 
 try:
-    import usys, uio, uos
+    import sys, io, vfs
 
-    usys.implementation._mpy
-    uio.IOBase
-    uos.mount
+    sys.implementation._mpy
+    io.IOBase
 except (ImportError, AttributeError):
     print("SKIP")
     raise SystemExit
 
-mpy_arch = usys.implementation._mpy >> 8
+mpy_arch = sys.implementation._mpy >> 8
 if mpy_arch >> 2 == 0:
     # This system does not support .mpy files containing native code
     print("SKIP")
     raise SystemExit
 
 
-class UserFile(uio.IOBase):
+class UserFile(io.IOBase):
     def __init__(self, data):
         self.data = memoryview(data)
         self.pos = 0
@@ -29,7 +28,9 @@ class UserFile(uio.IOBase):
         return n
 
     def ioctl(self, req, arg):
-        return 0
+        if req == 4:  # MP_STREAM_CLOSE
+            return 0
+        return -1
 
 
 class UserFS:
@@ -52,11 +53,12 @@ class UserFS:
 
 
 # these are the test .mpy files
-valid_header = bytes([77, 6, mpy_arch, 31])
+small_int_bits = 30
+valid_header = bytes([77, 6, (mpy_arch & 0x3F), small_int_bits])
 # fmt: off
 user_files = {
     # bad architecture (mpy_arch needed for sub-version)
-    '/mod0.mpy': bytes([77, 6, 0xfc | mpy_arch, 31]),
+    '/mod0.mpy': bytes([77, 6, 0xfc | (mpy_arch & 3), small_int_bits]),
 
     # test loading of viper and asm
     '/mod1.mpy': valid_header + (
@@ -110,8 +112,8 @@ user_files = {
 # fmt: on
 
 # create and mount a user filesystem
-uos.mount(UserFS(user_files), "/userfs")
-usys.path.append("/userfs")
+vfs.mount(UserFS(user_files), "/userfs")
+sys.path.append("/userfs")
 
 # import .mpy files from the user filesystem
 for i in range(len(user_files)):
@@ -120,8 +122,8 @@ for i in range(len(user_files)):
         __import__(mod)
         print(mod, "OK")
     except ValueError as er:
-        print(mod, "ValueError", er)
+        print(mod, "ValueError", str(er) or "incompatible .mpy arch")
 
 # unmount and undo path addition
-uos.umount("/userfs")
-usys.path.pop()
+vfs.umount("/userfs")
+sys.path.pop()

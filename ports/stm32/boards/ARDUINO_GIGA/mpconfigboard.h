@@ -4,16 +4,14 @@
  * Copyright (c) 2023 Arduino SA
  */
 
-#define MICROPY_HW_BOARD_NAME       "GIGA"
+#define MICROPY_HW_BOARD_NAME       "Arduino GIGA R1 WiFi"
 #define MICROPY_HW_MCU_NAME         "STM32H747"
-#define MICROPY_PY_SYS_PLATFORM     "Giga"
-#define MICROPY_HW_FLASH_FS_LABEL   "Giga"
+#define MICROPY_HW_FLASH_FS_LABEL   "GIGA R1 WiFi"
+
+// Network config
+#define MICROPY_PY_NETWORK_HOSTNAME_DEFAULT "mpy-giga-r1-wifi"
 
 #define MICROPY_OBJ_REPR            (MICROPY_OBJ_REPR_C)
-#define UINT_FMT                    "%u"
-#define INT_FMT                     "%d"
-typedef int mp_int_t;               // must be pointer size
-typedef unsigned int mp_uint_t;     // must be pointer size
 
 #define MICROPY_FATFS_EXFAT         (1)
 #define MICROPY_HW_ENABLE_RTC       (1)
@@ -27,10 +25,19 @@ typedef unsigned int mp_uint_t;     // must be pointer size
 #define MICROPY_HW_ENABLE_TIMER     (1)
 #define MICROPY_HW_ENABLE_SDCARD    (0)
 #define MICROPY_HW_ENABLE_MMCARD    (0)
+#define MICROPY_HW_ENTER_BOOTLOADER_VIA_RESET   (0)
+#define MICROPY_HW_TIM_IS_RESERVED(id) (id == 1)
+#define MICROPY_GC_SPLIT_HEAP       (1)
+
+// ROMFS config
+#define MICROPY_HW_ROMFS_ENABLE_EXTERNAL_QSPI       (1)
+#define MICROPY_HW_ROMFS_QSPI_SPIFLASH_OBJ          (&spi_bdev.spiflash)
+#define MICROPY_HW_ROMFS_ENABLE_PART0               (1)
 
 // Flash storage config
 #define MICROPY_HW_SPIFLASH_ENABLE_CACHE            (1)
-#define MICROPY_HW_ENABLE_INTERNAL_FLASH_STORAGE    (1)
+#define MICROPY_HW_SPIFLASH_SOFT_RESET              (1)
+#define MICROPY_HW_ENABLE_INTERNAL_FLASH_STORAGE    (0)
 
 #define MICROPY_BOARD_STARTUP       GIGA_board_startup
 void GIGA_board_startup(void);
@@ -45,10 +52,6 @@ void GIGA_board_low_power(int mode);
 #define MICROPY_BOARD_LEAVE_STOP    GIGA_board_low_power(0);
 #define MICROPY_BOARD_ENTER_STOP    GIGA_board_low_power(1);
 #define MICROPY_BOARD_ENTER_STANDBY GIGA_board_low_power(2);
-
-void GIGA_board_osc_enable(int enable);
-#define MICROPY_BOARD_OSC_ENABLE    GIGA_board_osc_enable(1);
-#define MICROPY_BOARD_OSC_DISABLE   GIGA_board_osc_enable(0);
 
 // PLL1 480MHz/48MHz SDMMC and FDCAN
 // USB and RNG are clocked from the HSI48
@@ -94,7 +97,6 @@ void GIGA_board_osc_enable(int enable);
 // Peripheral clock sources
 #define MICROPY_HW_RCC_HSI48_STATE      (RCC_HSI48_ON)
 #define MICROPY_HW_RCC_USB_CLKSOURCE    (RCC_USBCLKSOURCE_HSI48)
-#define MICROPY_HW_RCC_RTC_CLKSOURCE    (RCC_RTCCLKSOURCE_LSI)
 #define MICROPY_HW_RCC_FMC_CLKSOURCE    (RCC_FMCCLKSOURCE_PLL2)
 #define MICROPY_HW_RCC_RNG_CLKSOURCE    (RCC_RNGCLKSOURCE_HSI48)
 #define MICROPY_HW_RCC_ADC_CLKSOURCE    (RCC_ADCCLKSOURCE_PLL3)
@@ -107,9 +109,22 @@ void GIGA_board_osc_enable(int enable);
 // SMPS configuration
 #define MICROPY_HW_PWR_SMPS_CONFIG      (PWR_LDO_SUPPLY)
 
-// There is an external 32kHz oscillator
-#define RTC_ASYNCH_PREDIV           (0)
-#define RTC_SYNCH_PREDIV            (0x7fff)
+// Configure the analog switches for dual-pad pins.
+#define MICROPY_HW_ANALOG_SWITCH_PA0    (SYSCFG_SWITCH_PA0_OPEN)
+#define MICROPY_HW_ANALOG_SWITCH_PA1    (SYSCFG_SWITCH_PA1_OPEN)
+#define MICROPY_HW_ANALOG_SWITCH_PC2    (SYSCFG_SWITCH_PC2_OPEN)
+#define MICROPY_HW_ANALOG_SWITCH_PC3    (SYSCFG_SWITCH_PC3_OPEN)
+
+// There is an accurate external 32kHz oscillator (a SiT1532 on OSC32_IN), but the
+// stock Arduino MCUboot bootloader is built with Mbed's lse_available=false and
+// reinitialises the RTC onto the LSI (wiping the calendar) at every hard reset if it
+// finds any other clock source selected.  So the RTC is left running from the LSI,
+// with prescalers for its nominal 32kHz; the LSE (and its 32768Hz prescalers) is
+// picked up automatically on boards whose bootloader has been updated to enable it.
+#define RTC_ASYNCH_PREDIV_LSE       (0)
+#define RTC_SYNCH_PREDIV_LSE        (0x7fff)
+#define RTC_ASYNCH_PREDIV_LSI       (0)
+#define RTC_SYNCH_PREDIV_LSI        (31999)
 #define MICROPY_HW_RTC_USE_BYPASS   (0)
 #define MICROPY_HW_RTC_USE_US       (1)
 #define MICROPY_HW_RTC_USE_CALOUT   (1)
@@ -118,8 +133,8 @@ void GIGA_board_osc_enable(int enable);
 // QSPI flash #1 for storage
 #define MICROPY_HW_QSPI_PRESCALER           (2) // 100MHz
 #define MICROPY_HW_QSPIFLASH_SIZE_BITS_LOG2 (27)
-// Reserve 1MiB at the end for compatibility with alternate firmware that places WiFi blob here.
-#define MICROPY_HW_SPIFLASH_SIZE_BITS       (120 * 1024 * 1024)
+// Reserve 4MiB for romfs and 1MiB for WiFi/BT firmware.
+#define MICROPY_HW_SPIFLASH_SIZE_BITS       (88 * 1024 * 1024)
 #define MICROPY_HW_QSPIFLASH_CS             (pyb_pin_QSPI2_CS)
 #define MICROPY_HW_QSPIFLASH_SCK            (pyb_pin_QSPI2_CLK)
 #define MICROPY_HW_QSPIFLASH_IO0            (pyb_pin_QSPI2_D0)
@@ -130,13 +145,9 @@ void GIGA_board_osc_enable(int enable);
 // SPI flash #1, block device config
 extern const struct _mp_spiflash_config_t spiflash_config;
 extern struct _spi_bdev_t spi_bdev;
-#define MICROPY_HW_BDEV_IOCTL(op, arg) ( \
-    (op) == BDEV_IOCTL_NUM_BLOCKS ? (MICROPY_HW_SPIFLASH_SIZE_BITS / 8 / FLASH_BLOCK_SIZE) : \
-    (op) == BDEV_IOCTL_INIT ? spi_bdev_ioctl(&spi_bdev, (op), (uint32_t)&spiflash_config) : \
-    spi_bdev_ioctl(&spi_bdev, (op), (arg)) \
-    )
-#define MICROPY_HW_BDEV_READBLOCKS(dest, bl, n) spi_bdev_readblocks(&spi_bdev, (dest), (bl), (n))
-#define MICROPY_HW_BDEV_WRITEBLOCKS(src, bl, n) spi_bdev_writeblocks(&spi_bdev, (src), (bl), (n))
+#define MICROPY_HW_BDEV_SPIFLASH    (&spi_bdev)
+#define MICROPY_HW_BDEV_SPIFLASH_CONFIG (&spiflash_config)
+#define MICROPY_HW_BDEV_SPIFLASH_SIZE_BYTES (MICROPY_HW_SPIFLASH_SIZE_BITS / 8)
 #define MICROPY_HW_BDEV_SPIFLASH_EXTENDED (&spi_bdev)
 #endif
 
@@ -191,9 +202,9 @@ extern struct _spi_bdev_t spi_bdev;
 #define MICROPY_HW_USRSW_PRESSED    (1)
 
 // LEDs
-#define MICROPY_HW_LED1             (pyb_pin_LEDR) // red
-#define MICROPY_HW_LED2             (pyb_pin_LEDG) // green
-#define MICROPY_HW_LED3             (pyb_pin_LEDB) // yellow
+#define MICROPY_HW_LED1             (pyb_pin_LED_RED) // red
+#define MICROPY_HW_LED2             (pyb_pin_LED_GREEN) // green
+#define MICROPY_HW_LED3             (pyb_pin_LED_BLUE) // yellow
 #define MICROPY_HW_LED_ON(pin)      (mp_hal_pin_low(pin))
 #define MICROPY_HW_LED_OFF(pin)     (mp_hal_pin_high(pin))
 
@@ -225,11 +236,12 @@ extern struct _spi_bdev_t spi_bdev;
 #define MICROPY_HW_SDRAM_SIZE               (64 / 8 * 1024 * 1024)  // 64 Mbit
 #define MICROPY_HW_SDRAM_STARTUP_TEST       (1)
 #define MICROPY_HW_SDRAM_TEST_FAIL_ON_ERROR (true)
+#define MICROPY_HW_FMC_SWAP_BANKS           (1)
 
 // Timing configuration for 200MHz/2=100MHz (10ns)
 #define MICROPY_HW_SDRAM_CLOCK_PERIOD       2
 #define MICROPY_HW_SDRAM_CAS_LATENCY        2
-#define MICROPY_HW_SDRAM_FREQUENCY          (100000) // 100 MHz
+#define MICROPY_HW_SDRAM_FREQUENCY_KHZ      (100000) // 100 MHz
 #define MICROPY_HW_SDRAM_TIMING_TMRD        (2)
 #define MICROPY_HW_SDRAM_TIMING_TXSR        (7)
 #define MICROPY_HW_SDRAM_TIMING_TRAS        (5)
@@ -296,7 +308,9 @@ extern struct _spi_bdev_t spi_bdev;
 #define MICROPY_HW_FMC_D15          (pin_D10)
 
 #define MICROPY_HW_USB_VID                      0x2341
+#ifndef MICROPY_HW_USB_PID
 #define MICROPY_HW_USB_PID                      0x0566
+#endif
 #define MICROPY_HW_USB_PID_CDC_MSC              (MICROPY_HW_USB_PID)
 #define MICROPY_HW_USB_PID_CDC_HID              (MICROPY_HW_USB_PID)
 #define MICROPY_HW_USB_PID_CDC                  (MICROPY_HW_USB_PID)

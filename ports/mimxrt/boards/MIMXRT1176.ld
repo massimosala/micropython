@@ -30,8 +30,10 @@ m_core1_image_start = vfs_start - 0x00040000;
 m_core1_image_size  = 0x00040000;
 #endif
 
-text_size           = ((vfs_start) - (text_start));
 vfs_size            = ((flash_end) - (vfs_start));
+_micropy_hw_romfs_part0_start = ((vfs_start) - MICROPY_HW_ROMFS_BYTES);
+_micropy_hw_romfs_part0_size = MICROPY_HW_ROMFS_BYTES;
+text_size           = ((_micropy_hw_romfs_part0_start) - (text_start));
 itcm_start          = 0x00000000;
 itcm_size           = 0x00020000;
 dtcm_start          = 0x20000000;
@@ -39,7 +41,7 @@ dtcm_size           = 0x00020000;
 ocrm_start          = 0x20240000;
 ocrm_size           = 0x00100000;
 
-#ifdef MICROPY_HW_SDRAM_AVAIL
+#if MICROPY_HW_SDRAM_AVAIL
 sdram_start         = 0x80000000;
 sdram_size          = MICROPY_HW_SDRAM_SIZE;
 #endif
@@ -49,7 +51,7 @@ __stack_size__ = 0x8000;
 _estack = __StackTop;
 _sstack = __StackLimit;
 
-#ifdef MICROPY_HW_SDRAM_AVAIL
+#if MICROPY_HW_SDRAM_AVAIL
 _gc_heap_start = ORIGIN(m_sdram);
 _gc_heap_end = ORIGIN(m_sdram) + LENGTH(m_sdram);
 #else
@@ -57,3 +59,7 @@ _gc_heap_end = ORIGIN(m_sdram) + LENGTH(m_sdram);
 _gc_heap_start = ORIGIN(m_ocrm);
 _gc_heap_end = ORIGIN(m_ocrm) + LENGTH(m_ocrm);
 #endif
+
+/* CM4 DTCM */
+_openamp_shm_region_start = 0x20220000;
+_openamp_shm_region_end  = 0x20230000;

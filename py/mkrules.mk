@@ -4,6 +4,13 @@ THIS_MAKEFILE = $(lastword $(MAKEFILE_LIST))
 include $(dir $(THIS_MAKEFILE))mkenv.mk
 endif
 
+# Enable in-progress/breaking changes that are slated for MicroPython 2.x.
+MICROPY_PREVIEW_VERSION_2 ?= 0
+
+ifeq ($(MICROPY_PREVIEW_VERSION_2),1)
+CFLAGS += -DMICROPY_PREVIEW_VERSION_2=1
+endif
+
 HELP_BUILD_ERROR ?= "See \033[1;31mhttps://github.com/micropython/micropython/wiki/Build-Troubleshooting\033[0m"
 HELP_MPY_LIB_SUBMODULE ?= "\033[1;31mError: micropython-lib submodule is not initialized.\033[0m Run 'make submodules'"
 
@@ -20,10 +27,33 @@ OBJ_EXTRA_ORDER_DEPS += $(HEADER_BUILD)/compressed.data.h
 CFLAGS += -DMICROPY_ROM_TEXT_COMPRESSION=1
 endif
 
+# Set the variant or board name.
+ifneq ($(VARIANT),)
+CFLAGS += -DMICROPY_BOARD_BUILD_NAME=\"$(VARIANT)\"
+else ifneq ($(BOARD),)
+ifeq ($(BOARD_VARIANT),)
+CFLAGS += -DMICROPY_BOARD_BUILD_NAME=\"$(BOARD)\"
+else
+CFLAGS += -DMICROPY_BOARD_BUILD_NAME=\"$(BOARD)-$(BOARD_VARIANT)\"
+endif
+endif
+
+# Add default C++ compiler flags based on CFLAGS. For use with C++ user modules.
+CXXFLAGS += $(filter-out -Wmissing-prototypes -Wold-style-definition -std=gnu99 -std=c99 -std=c11,$(CFLAGS) $(CXXFLAGS_MOD))
+
+# Add LDFLAGS to link libstdc++ on bare metal ports. Added only if a port has
+# -nostdlib in LDFLAGS and C++ source files are provided.
+ifneq ($(findstring nostdlib,"$(LDFLAGS)"),)
+ifneq ($(SRC_CXX)$(SRC_USERMOD_CXX)$(SRC_USERMOD_LIB_CXX),)
+LIBSTDCPP_FILE_NAME = "$(shell $(CXX) $(CXXFLAGS) -print-file-name=libstdc++.a)"
+LDFLAGS += -L"$(shell dirname $(LIBSTDCPP_FILE_NAME))"
+endif
+endif
+
 # QSTR generation uses the same CFLAGS, with these modifications.
 QSTR_GEN_FLAGS = -DNO_QSTR
-# Note: := to force evalulation immediately.
-QSTR_GEN_CFLAGS := $(CFLAGS)
+# Note: := to force evaluation immediately.
+QSTR_GEN_CFLAGS := $(filter-out -g%,$(CFLAGS))
 QSTR_GEN_CFLAGS += $(QSTR_GEN_FLAGS)
 QSTR_GEN_CXXFLAGS := $(CXXFLAGS)
 QSTR_GEN_CXXFLAGS += $(QSTR_GEN_FLAGS)
@@ -44,19 +74,19 @@ QSTR_GEN_CXXFLAGS += $(QSTR_GEN_FLAGS)
 # can be located. By following this scheme, it allows a single build rule
 # to be used to compile all .c files.
 
-vpath %.S . $(TOP) $(USER_C_MODULES)
+vpath %.S . $(TOP) $(USER_C_MODULES) $(USERMOD_DIR_PARENTS)
 $(BUILD)/%.o: %.S
 	$(ECHO) "CC $<"
 	$(Q)$(CC) $(CFLAGS) -c -o $@ $<
 
-vpath %.s . $(TOP) $(USER_C_MODULES)
+vpath %.s . $(TOP) $(USER_C_MODULES) $(USERMOD_DIR_PARENTS)
 $(BUILD)/%.o: %.s
 	$(ECHO) "AS $<"
-	$(Q)$(AS) -o $@ $<
+	$(Q)$(AS) $(AFLAGS) -o $@ $<
 
 define compile_c
 $(ECHO) "CC $<"
-$(Q)$(CC) $(CFLAGS) -c -MD -o $@ $< || (echo -e $(HELP_BUILD_ERROR); false)
+$(Q)$(CC) $(CFLAGS) -c -MD -MF $(@:.o=.d) -o $@ $< || (echo -e $(HELP_BUILD_ERROR); false)
 @# The following fixes the dependency file.
 @# See http://make.paulandlesley.org/autodep.html for details.
 @# Regex adjusted from the above to play better with Windows paths, etc.
@@ -68,7 +98,7 @@ endef
 
 define compile_cxx
 $(ECHO) "CXX $<"
-$(Q)$(CXX) $(CXXFLAGS) -c -MD -o $@ $< || (echo -e $(HELP_BUILD_ERROR); false)
+$(Q)$(CXX) $(CXXFLAGS) -c -MD -MF $(@:.o=.d) -o $@ $< || (echo -e $(HELP_BUILD_ERROR); false)
 @# The following fixes the dependency file.
 @# See http://make.paulandlesley.org/autodep.html for details.
 @# Regex adjusted from the above to play better with Windows paths, etc.
@@ -78,17 +108,25 @@ $(Q)$(CXX) $(CXXFLAGS) -c -MD -o $@ $< || (echo -e $(HELP_BUILD_ERROR); false)
   $(RM) -f $(@:.o=.d)
 endef
 
-vpath %.c . $(TOP) $(USER_C_MODULES)
+vpath %.c . $(TOP) $(USER_C_MODULES) $(USERMOD_DIR_PARENTS)
 $(BUILD)/%.o: %.c
 	$(call compile_c)
 
-vpath %.cpp . $(TOP) $(USER_C_MODULES)
+vpath %.cpp . $(TOP) $(USER_C_MODULES) $(USERMOD_DIR_PARENTS)
 $(BUILD)/%.o: %.cpp
 	$(call compile_cxx)
 
-$(BUILD)/%.pp: %.c
+$(BUILD)/%.pp: %.c FORCE
 	$(ECHO) "PreProcess $<"
 	$(Q)$(CPP) $(CFLAGS) -Wp,-C,-dD,-dI -o $@ $<
+
+.PHONY: $(BUILD)/%.sz
+$(BUILD)/%.sz: $(BUILD)/%.o
+	$(Q)$(SIZE) $<
+
+# Special case for compiling auto-generated source files.
+$(BUILD)/%.o: $(BUILD)/%.c
+	$(call compile_c)
 
 # The following rule uses | to create an order only prerequisite. Order only
 # prerequisites only get built if they don't exist. They don't cause timestamp
@@ -163,9 +201,12 @@ $(HEADER_BUILD):
 	$(MKDIR) -p $@
 
 ifneq ($(MICROPY_MPYCROSS_DEPENDENCY),)
-# to automatically build mpy-cross, if needed
+# Build mpy-cross automatically if needed. Clear USER_C_MODULES and
+# FROZEN_MANIFEST so a port build with either set doesn't leak them into the
+# mpy-cross sub-make and cause manifest.mk there to parse the port's manifest
+# from the wrong cwd.
 $(MICROPY_MPYCROSS_DEPENDENCY):
-	$(MAKE) -C $(abspath $(dir $@)..)
+	$(MAKE) -C "$(abspath $(dir $@)..)" USER_C_MODULES= FROZEN_MANIFEST=
 endif
 
 ifneq ($(FROZEN_DIR),)
@@ -183,10 +224,10 @@ ifeq ($(MPY_LIB_DIR),$(MPY_LIB_SUBMODULE_DIR))
 GIT_SUBMODULES += lib/micropython-lib
 endif
 
-# to build frozen_content.c from a manifest
-$(BUILD)/frozen_content.c: FORCE $(BUILD)/genhdr/qstrdefs.generated.h $(BUILD)/genhdr/root_pointers.h | $(MICROPY_MPYCROSS_DEPENDENCY)
-	$(Q)test -e "$(MPY_LIB_DIR)/README.md" || (echo -e $(HELP_MPY_LIB_SUBMODULE); false)
-	$(Q)$(MAKE_MANIFEST) -o $@ -v "MPY_DIR=$(TOP)" -v "MPY_LIB_DIR=$(MPY_LIB_DIR)" -v "PORT_DIR=$(shell pwd)" -v "BOARD_DIR=$(BOARD_DIR)" -b "$(BUILD)" $(if $(MPY_CROSS_FLAGS),-f"$(MPY_CROSS_FLAGS)",) --mpy-tool-flags="$(MPY_TOOL_FLAGS)" $(FROZEN_MANIFEST)
+# Set compile options needed to enable frozen code.
+CFLAGS += -DMICROPY_QSTR_EXTRA_POOL=mp_qstr_frozen_const_pool
+CFLAGS += -DMICROPY_MODULE_FROZEN_MPY
+CFLAGS += -DMICROPY_MODULE_FROZEN_STR
 endif
 
 ifneq ($(PROG),)
@@ -205,9 +246,11 @@ $(BUILD)/$(PROG): $(OBJ)
 	$(ECHO) "LINK $@"
 # Do not pass COPT here - it's *C* compiler optimizations. For example,
 # we may want to compile using Thumb, but link with non-Thumb libc.
-	$(Q)$(CC) -o $@ $^ $(LIB) $(LDFLAGS)
+	$(Q)$(CC) -o $@ $^ $(LIBS) $(LDFLAGS)
 ifndef DEBUG
+ifdef STRIP
 	$(Q)$(STRIP) $(STRIPFLAGS_EXTRA) $@
+endif
 endif
 	$(Q)$(SIZE) $$(find $(BUILD) -path "$(BUILD)/build/frozen*.o") $@
 
@@ -219,11 +262,17 @@ clean-prog:
 .PHONY: clean-prog
 endif
 
+# If available, do blobless partial clones of submodules to save time and space.
+# A blobless partial clone lazily fetches data as needed, but has all the metadata available (tags, etc.).
+# Fallback to standard submodule update if blobless isn't available (earlier than 2.36.0)
+#
+# Note: This target has a CMake equivalent in py/mkrules.cmake
 submodules:
 	$(ECHO) "Updating submodules: $(GIT_SUBMODULES)"
 ifneq ($(GIT_SUBMODULES),)
-	$(Q)git submodule sync $(addprefix $(TOP)/,$(GIT_SUBMODULES))
-	$(Q)git submodule update --init $(addprefix $(TOP)/,$(GIT_SUBMODULES))
+	$(Q)cd $(TOP) && git submodule sync $(GIT_SUBMODULES)
+	$(Q)cd $(TOP) && git submodule update --init --filter=blob:none $(GIT_SUBMODULES) 2>/dev/null || \
+	  git submodule update --init $(GIT_SUBMODULES)
 endif
 .PHONY: submodules
 

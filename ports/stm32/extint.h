@@ -37,7 +37,7 @@
 #if defined(STM32L4)
 #define EXTI_RTC_ALARM          (18)
 #define EXTI_USB_OTG_FS_WAKEUP  (17)
-#else
+#elif !defined(STM32U5)
 #define EXTI_RTC_ALARM          (17)
 #define EXTI_USB_OTG_FS_WAKEUP  (18)
 #endif
@@ -46,12 +46,20 @@
 #if defined(STM32F0) || defined(STM32G4) || defined(STM32L1) || defined(STM32L4) || defined(STM32WL)
 #define EXTI_RTC_TIMESTAMP      (19)
 #define EXTI_RTC_WAKEUP         (20)
+#elif defined(STM32H5) || defined(STM32N6)
+#define EXTI_RTC_WAKEUP         (17)
+#define EXTI_RTC_TAMP           (19)
 #elif defined(STM32H7) || defined(STM32WB)
 #define EXTI_RTC_TIMESTAMP      (18)
 #define EXTI_RTC_WAKEUP         (19)
 #elif defined(STM32G0)
 #define EXTI_RTC_WAKEUP         (19)
 #define EXTI_RTC_TIMESTAMP      (21)
+#elif defined(STM32U5)
+#define EXTI_RTC_TIMESTAMP      (26)
+#define EXTI_RTC_WAKEUP         (27)
+#define EXTI_RTC_ALARM          (28)
+#define EXTI_USB_OTG_FS_WAKEUP  (29)
 #else
 #define EXTI_RTC_TIMESTAMP      (21)
 #define EXTI_RTC_WAKEUP         (22)
@@ -61,12 +69,13 @@
 #endif
 
 #define EXTI_NUM_VECTORS        (PYB_EXTI_NUM_VECTORS)
+extern mp_obj_t pyb_extint_callback_arg[];
 
 void extint_init0(void);
 
 uint extint_register(mp_obj_t pin_obj, uint32_t mode, uint32_t pull, mp_obj_t callback_obj, bool override_callback_obj);
-void extint_register_pin(const pin_obj_t *pin, uint32_t mode, bool hard_irq, mp_obj_t callback_obj);
-void extint_set(const pin_obj_t *pin, uint32_t mode);
+void extint_register_pin(const machine_pin_obj_t *pin, uint32_t mode, bool hard_irq, mp_obj_t callback_obj);
+void extint_set(const machine_pin_obj_t *pin, uint32_t mode);
 
 void extint_enable(uint line);
 void extint_disable(uint line);

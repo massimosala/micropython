@@ -29,33 +29,53 @@
 #include "py/runtime.h"
 #include "py/gc.h"
 #include "py/mperrno.h"
-#include "py/stackctrl.h"
 #include "shared/readline/readline.h"
 #include "shared/runtime/gchelper.h"
 #include "shared/runtime/pyexec.h"
 #include "shared/runtime/softtimer.h"
+#include "shared/tinyusb/mp_usbd.h"
 #include "ticks.h"
-#include "tusb.h"
 #include "led.h"
 #include "pendsv.h"
+#include "psram.h"
 #include "modmachine.h"
+#include "modmimxrt.h"
 
 #if MICROPY_PY_LWIP
 #include "lwip/init.h"
 #include "lwip/apps/mdns.h"
+#if MICROPY_PY_NETWORK_CYW43
+#include "lib/cyw43-driver/src/cyw43.h"
 #endif
+#endif
+
+#if MICROPY_PY_BLUETOOTH
+#include "mpbthciport.h"
+#include "extmod/modbluetooth.h"
+#endif
+
 #include "systick.h"
+#include "extmod/modmachine.h"
 #include "extmod/modnetwork.h"
+#include "extmod/vfs.h"
 
 extern uint8_t _sstack, _estack, _gc_heap_start, _gc_heap_end;
+extern void machine_encoder_deinit_all(void);
+#if MICROPY_PY_MACHINE_CAN
+void machine_can_deinit_all(void);
+#endif
+
 
 void board_init(void);
 
 int main(void) {
     board_init();
     ticks_init();
-    tusb_init();
     pendsv_init();
+
+    #if MICROPY_HW_ENABLE_PSRAM
+    size_t psram_size = configure_external_ram();
+    #endif
 
     #if MICROPY_PY_LWIP
     // lwIP doesn't allow to reinitialise itself by subsequent calls to this function
@@ -68,16 +88,43 @@ int main(void) {
 
     systick_enable_dispatch(SYSTICK_DISPATCH_LWIP, mod_network_lwip_poll_wrapper);
     #endif
+    #if MICROPY_PY_BLUETOOTH
+    mp_bluetooth_hci_init();
+    #endif
+
+    #if MICROPY_PY_NETWORK_CYW43
+    {
+        cyw43_init(&cyw43_state);
+        uint8_t buf[8];
+        memcpy(&buf[0], "PYBD", 4);
+        mp_hal_get_mac_ascii(MP_HAL_MAC_WLAN0, 8, 4, (char *)&buf[4]);
+        cyw43_wifi_ap_set_ssid(&cyw43_state, 8, buf);
+        cyw43_wifi_ap_set_auth(&cyw43_state, CYW43_AUTH_WPA2_MIXED_PSK);
+        cyw43_wifi_ap_set_password(&cyw43_state, 8, (const uint8_t *)"pybd0123");
+    }
+    #endif
 
     for (;;) {
-        #if defined(MICROPY_HW_LED1)
+        #if defined(MICROPY_HW_LED1_PIN)
         led_init();
         #endif
 
-        mp_stack_set_top(&_estack);
-        mp_stack_set_limit(&_estack - &_sstack - 1024);
+        mp_cstack_init_with_top(&_estack, &_estack - &_sstack);
 
+        #if MICROPY_HW_ENABLE_PSRAM
+        if (psram_size) {
+            #if MICROPY_GC_SPLIT_HEAP
+            gc_init(&_gc_heap_start, &_gc_heap_end);
+            gc_add((void *)PSRAM_BASE, (void *)(PSRAM_BASE + psram_size));
+            #else
+            gc_init((void *)PSRAM_BASE, (void *)(PSRAM_BASE + psram_size));
+            #endif
+        } else {
+            gc_init(&_gc_heap_start, &_gc_heap_end);
+        }
+        #else
         gc_init(&_gc_heap_start, &_gc_heap_end);
+        #endif
         mp_init();
 
         #if MICROPY_PY_NETWORK
@@ -90,8 +137,26 @@ int main(void) {
         // Execute _boot.py to set up the filesystem.
         pyexec_frozen_module("_boot.py", false);
 
+        #if MICROPY_HW_USB_MSC
+        // Set the USB medium to flash block device.
+        mimxrt_msc_medium = &mimxrt_flash_type;
+
+        #if MICROPY_PY_MACHINE_SDCARD
+        const char *path = "/sdcard";
+        // If SD is mounted, set the USB medium to SD.
+        if (mp_vfs_lookup_path(path, &path) != MP_VFS_NONE) {
+            mimxrt_msc_medium = &machine_sdcard_type;
+        }
+        #endif
+        #endif
+
         // Execute user scripts.
         int ret = pyexec_file_if_exists("boot.py");
+
+        #if MICROPY_HW_ENABLE_USBDEV
+        mp_usbd_init();
+        #endif
+
         if (ret & PYEXEC_FORCED_EXIT) {
             goto soft_reset_exit;
         }
@@ -117,15 +182,30 @@ int main(void) {
 
     soft_reset_exit:
         mp_printf(MP_PYTHON_PRINTER, "MPY: soft reboot\n");
+        #if MICROPY_PY_MACHINE_CAN
+        machine_can_deinit_all();
+        #endif
         machine_pin_irq_deinit();
+        machine_rtc_irq_deinit();
         #if MICROPY_PY_MACHINE_I2S
         machine_i2s_deinit_all();
+        #endif
+        #if MICROPY_PY_BLUETOOTH
+        mp_bluetooth_deinit();
         #endif
         #if MICROPY_PY_NETWORK
         mod_network_deinit();
         #endif
+        #if MICROPY_PY_MACHINE_UART
+        machine_uart_deinit_all();
+        #endif
+        #if MICROPY_PY_MACHINE_PWM
         machine_pwm_deinit_all();
+        #endif
         soft_timer_deinit();
+        #if MICROPY_PY_MACHINE_QECNT
+        machine_encoder_deinit_all();
+        #endif
         gc_sweep_all();
         mp_deinit();
     }
@@ -140,6 +220,11 @@ void gc_collect(void) {
 }
 
 void nlr_jump_fail(void *val) {
+    for (;;) {
+    }
+}
+
+void abort(void) {
     for (;;) {
     }
 }

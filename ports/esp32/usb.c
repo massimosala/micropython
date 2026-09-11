@@ -28,64 +28,48 @@
 #include "py/mphal.h"
 #include "usb.h"
 
-#if CONFIG_USB_ENABLED
+#if MICROPY_HW_ENABLE_USBDEV
 
-#include "tinyusb.h"
-#include "tusb_cdc_acm.h"
+#include "esp_mac.h"
+#include "esp_rom_gpio.h"
+#include "esp_private/usb_phy.h"
 
-#define CDC_ITF TINYUSB_CDC_ACM_0
+#include "shared/tinyusb/mp_usbd.h"
 
-static uint8_t usb_rx_buf[CONFIG_USB_CDC_RX_BUFSIZE];
+static usb_phy_handle_t phy_hdl;
 
-static void usb_callback_rx(int itf, cdcacm_event_t *event) {
-    // TODO: what happens if more chars come in during this function, are they lost?
-    for (;;) {
-        size_t len = 0;
-        esp_err_t ret = tinyusb_cdcacm_read(itf, usb_rx_buf, sizeof(usb_rx_buf), &len);
-        if (ret != ESP_OK) {
-            break;
-        }
-        if (len == 0) {
-            break;
-        }
-        for (size_t i = 0; i < len; ++i) {
-            if (usb_rx_buf[i] == mp_interrupt_char) {
-                mp_sched_keyboard_interrupt();
-            } else {
-                ringbuf_put(&stdin_ringbuf, usb_rx_buf[i]);
-            }
-        }
-    }
-}
+void usb_phy_init(void) {
+    // ref: https://github.com/espressif/esp-usb/blob/4b6a798d0bed444fff48147c8dcdbbd038e92892/device/esp_tinyusb/tinyusb.c
 
-void usb_init(void) {
-    // Initialise the USB with defaults.
-    tinyusb_config_t tusb_cfg = {0};
-    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
-
-    // Initialise the USB serial interface.
-    tinyusb_config_cdcacm_t amc_cfg = {
-        .usb_dev = TINYUSB_USBDEV_0,
-        .cdc_port = CDC_ITF,
-        .rx_unread_buf_sz = 256,
-        .callback_rx = &usb_callback_rx,
-        .callback_rx_wanted_char = NULL,
-        .callback_line_state_changed = NULL,
-        .callback_line_coding_changed = NULL
+    // Configure USB PHY
+    static const usb_phy_config_t phy_conf = {
+        .controller = USB_PHY_CTRL_OTG,
+        .otg_mode = USB_OTG_MODE_DEVICE,
+        .target = USB_PHY_TARGET_INT,
     };
-    ESP_ERROR_CHECK(tusb_cdc_acm_init(&amc_cfg));
 
+    // Init ESP USB Phy
+    usb_new_phy(&phy_conf, &phy_hdl);
 }
 
-void usb_tx_strn(const char *str, size_t len) {
-    // Write out the data to the CDC interface, but only while the USB host is connected.
-    uint64_t timeout = esp_timer_get_time() + (uint64_t)(MICROPY_HW_USB_CDC_TX_TIMEOUT * 1000);
-    while (tud_cdc_n_connected(CDC_ITF) && len && esp_timer_get_time() < timeout) {
-        size_t l = tinyusb_cdcacm_write_queue(CDC_ITF, (uint8_t *)str, len);
-        str += l;
-        len -= l;
-        tud_cdc_n_write_flush(CDC_ITF);
-    }
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
+void usb_usj_mode(void) {
+    // Switch the USB PHY back to Serial/Jtag mode, disabling OTG support
+    // This should be run before jumping to bootloader.
+    usb_del_phy(phy_hdl);
+    usb_phy_config_t phy_conf = {
+        .controller = USB_PHY_CTRL_SERIAL_JTAG,
+    };
+    usb_new_phy(&phy_conf, &phy_hdl);
+}
+#endif
+
+void mp_usbd_port_get_serial_number(char *serial_buf) {
+    // use factory default MAC as serial ID
+    uint8_t mac[8];
+    esp_efuse_mac_get_default(mac);
+    MP_STATIC_ASSERT(sizeof(mac) * 2 <= MICROPY_HW_USB_DESC_STR_MAX);
+    mp_usbd_hex_str(serial_buf, mac, sizeof(mac));
 }
 
-#endif // CONFIG_USB_ENABLED
+#endif // MICROPY_HW_ENABLE_USBDEV

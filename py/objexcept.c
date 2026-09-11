@@ -81,6 +81,8 @@ void mp_init_emergency_exception_buf(void) {
 #else
 #define mp_emergency_exception_buf_size MP_STATE_VM(mp_emergency_exception_buf_size)
 
+#include "py/mphal.h" // for MICROPY_BEGIN_ATOMIC_SECTION/MICROPY_END_ATOMIC_SECTION
+
 void mp_init_emergency_exception_buf(void) {
     mp_emergency_exception_buf_size = 0;
     MP_STATE_VM(mp_emergency_exception_buf) = NULL;
@@ -115,7 +117,7 @@ bool mp_obj_is_native_exception_instance(mp_obj_t self_in) {
     return MP_OBJ_TYPE_GET_SLOT_OR_NULL(mp_obj_get_type(self_in), make_new) == mp_obj_exception_make_new;
 }
 
-STATIC mp_obj_exception_t *get_native_exception(mp_obj_t self_in) {
+static mp_obj_exception_t *get_native_exception(mp_obj_t self_in) {
     assert(mp_obj_is_exception_instance(self_in));
     if (mp_obj_is_native_exception_instance(self_in)) {
         return MP_OBJ_TO_PTR(self_in);
@@ -124,7 +126,7 @@ STATIC mp_obj_exception_t *get_native_exception(mp_obj_t self_in) {
     }
 }
 
-STATIC void decompress_error_text_maybe(mp_obj_exception_t *o) {
+static void decompress_error_text_maybe(mp_obj_exception_t *o) {
     #if MICROPY_ROM_TEXT_COMPRESSION
     if (o->args->len == 1 && mp_obj_is_exact_type(o->args->items[0], &mp_type_str)) {
         mp_obj_str_t *o_str = MP_OBJ_TO_PTR(o->args->items[0]);
@@ -163,7 +165,7 @@ void mp_obj_exception_print(const mp_print_t *print, mp_obj_t o_in, mp_print_kin
     mp_print_kind_t k = kind & ~PRINT_EXC_SUBCLASS;
     bool is_subclass = kind & PRINT_EXC_SUBCLASS;
     if (!is_subclass && (k == PRINT_REPR || k == PRINT_EXC)) {
-        mp_print_str(print, qstr_str(o->base.type->name));
+        mp_print_str(print, mp_obj_get_type_str(o_in));
     }
 
     if (k == PRINT_EXC) {
@@ -178,7 +180,7 @@ void mp_obj_exception_print(const mp_print_t *print, mp_obj_t o_in, mp_print_kin
             return;
         }
 
-        #if MICROPY_PY_UERRNO
+        #if MICROPY_PY_ERRNO
         // try to provide a nice OSError error message
         if (o->base.type == &mp_type_OSError && o->args->len > 0 && o->args->len < 3 && mp_obj_is_small_int(o->args->items[0])) {
             qstr qst = mp_errno_to_str(o->args->items[0]);
@@ -221,7 +223,7 @@ mp_obj_t mp_obj_exception_make_new(const mp_obj_type_t *type, size_t n_args, siz
         o_tuple = (mp_obj_tuple_t *)&mp_const_empty_tuple_obj;
     } else {
         // Try to allocate memory for the tuple containing the args
-        o_tuple = m_new_obj_var_maybe(mp_obj_tuple_t, mp_obj_t, n_args);
+        o_tuple = m_new_obj_var_maybe(mp_obj_tuple_t, items, mp_obj_t, n_args);
 
         #if MICROPY_ENABLE_EMERGENCY_EXCEPTION_BUF
         // If we are called by mp_obj_new_exception_msg_varg then it will have
@@ -270,7 +272,7 @@ void mp_obj_exception_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
             // We allow 'exc.__traceback__ = None' assignment as low-level
             // optimization of pre-allocating exception instance and raising
             // it repeatedly - this avoids memory allocation during raise.
-            // However, uPy will keep adding traceback entries to such
+            // However, MicroPython will keep adding traceback entries to such
             // exception instance, so before throwing it, traceback should
             // be cleared like above.
             self->traceback_len = 0;
@@ -437,7 +439,7 @@ struct _exc_printer_t {
     byte *buf;
 };
 
-STATIC void exc_add_strn(void *data, const char *str, size_t len) {
+static void exc_add_strn(void *data, const char *str, size_t len) {
     struct _exc_printer_t *pr = data;
     if (pr->len + len >= pr->alloc) {
         // Not enough room for data plus a null byte so try to grow the buffer
@@ -551,7 +553,14 @@ bool mp_obj_is_exception_type(mp_obj_t self_in) {
 
 // return true if the given object is an instance of an exception type
 bool mp_obj_is_exception_instance(mp_obj_t self_in) {
-    return mp_obj_is_exception_type(MP_OBJ_FROM_PTR(mp_obj_get_type(self_in)));
+    if (mp_obj_is_native_exception_instance(self_in)) {
+        return true;
+    }
+    if (!mp_obj_is_exception_type(MP_OBJ_FROM_PTR(mp_obj_get_type(self_in)))) {
+        return false;
+    }
+    mp_obj_instance_t *self = MP_OBJ_TO_PTR(self_in);
+    return self->subobj[0] != MP_OBJ_FROM_PTR((void *)&mp_native_base_init_wrapper_obj);
 }
 
 // Return true if exception (type or instance) is a subclass of given

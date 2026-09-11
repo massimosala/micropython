@@ -20,9 +20,14 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'micropython repo'  # test build with space in path
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
+      with:
+        path: 'micropython repo'
     - name: Install packages
-      run: source tools/ci.sh && ci_rp2_setup
+      run: tools/ci.sh rp2_setup
     - name: Build
-      run: source tools/ci.sh && ci_rp2_build
+      run: tools/ci.sh rp2_build

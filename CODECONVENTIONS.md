@@ -53,13 +53,16 @@ are then certifying and signing off against the following:
 Code auto-formatting
 ====================
 
-Both C and Python code are auto-formatted using the `tools/codeformat.py`
-script.  This uses [uncrustify](https://github.com/uncrustify/uncrustify) to
-format C code and [black](https://github.com/psf/black) to format Python code.
-After making changes, and before committing, run this tool to reformat your
-changes to the correct style.  Without arguments this tool will reformat all
-source code (and may take some time to run).  Otherwise pass as arguments to
-the tool the files that changed and it will only reformat those.
+Both C and Python code formatting are controlled for consistency across the
+MicroPython codebase.  C code is formatted using the `tools/codeformat.py`
+script which uses [uncrustify](https://github.com/uncrustify/uncrustify).
+Python code is linted and formatted using
+[ruff & ruff format](https://github.com/astral-sh/ruff).
+After making changes, and before committing, run  `tools/codeformat.py` to
+reformat your C code and `ruff format` for any Python code.  Without
+arguments this tool will reformat all source code (and may take some time
+to run).  Otherwise pass as arguments to the tool the files that changed,
+and it will only reformat those.
 
 uncrustify
 ==========
@@ -69,36 +72,44 @@ be used for MicroPython. Different uncrustify versions produce slightly
 different formatting, and the configuration file formats are often
 incompatible. v0.73 or newer *will not work*.
 
-Depending on your operating system version, it may be possible to install a pre-compiled
-uncrustify version:
+Depending on your operating system version, it may be possible to install a
+compatible pre-compiled uncrustify version. Otherwise, a compatible version is
+available via the PyPI package archive:
 
-Ubuntu, Debian
---------------
-
-Ubuntu versions 21.10 or 22.04LTS, and Debian versions bullseye or bookworm all
-include v0.72 so can be installed directly:
+Pip
+---
 
 ```
-$ apt install uncrustify
+pip install micropython-uncrustify
 ```
 
-Arch Linux
-----------
+This installs a native compiled uncrustify binary as a Python executable, so it
+can be installed into a virtualenv.
 
-The current Arch uncrustify version is too new. There is an [old Arch package
-for v0.72](https://archive.archlinux.org/packages/u/uncrustify/) that can be
-installed from the Arch Linux archive ([more
-information](https://wiki.archlinux.org/title/Downgrading_packages#Arch_Linux_Archive)). Use
-the [IgnorePkg feature](https://wiki.archlinux.org/title/Pacman#Skip_package_from_being_upgraded)
-to prevent it re-updating.
-
-Brew
+Pipx
 ----
 
-This command may work, please raise a new Issue if it doesn't:
+It's also possible to install via [pipx](https://pipx.pypa.io/) if not using a
+virtualenv:
 
 ```
-curl -L https://github.com/Homebrew/homebrew-core/raw/2b07d8192623365078a8b855a164ebcdf81494a6/Formula/uncrustify.rb > uncrustify.rb && brew install uncrustify.rb && rm uncrustify.rb
+pipx install micropython-uncrustify
+```
+
+Code spell checking
+===================
+
+Code spell checking is done using [codespell](https://github.com/codespell-project/codespell#codespell)
+and runs in a GitHub action in CI.  Codespell is configured via `pyproject.toml`
+to avoid false positives.  It is recommended run codespell before submitting a
+PR.  To simplify this, codespell is configured as a pre-commit hook and will be
+installed if you run `pre-commit install` (see below).
+
+If you want to install and run codespell manually, you can do so by running:
+
+```
+$ pip install codespell tomli
+$ codespell
 ```
 
 Automatic Pre-Commit Hooks
@@ -107,6 +118,9 @@ Automatic Pre-Commit Hooks
 To have code formatting and commit message conventions automatically checked,
 a configuration file is provided for the [pre-commit](https://pre-commit.com/)
 tool.
+
+Pre-commit will automatically install the correct version of dependencies
+such as codespell, uncrustify, etc.
 
 First install `pre-commit`, either from your system package manager or via
 `pip`. When installing `pre-commit` via pip, it is recommended to use a
@@ -119,10 +133,6 @@ $ pacman -Sy python-precommit  # Arch Linux
 $ brew install pre-commit      # Brew
 $ pip install pre-commit       # PyPI
 ```
-
-Next, install [uncrustify (see above)](#uncrustify). Other dependencies are managed by
-pre-commit automatically, but uncrustify needs to be installed and available on
-the PATH.
 
 Then, inside the MicroPython repository, register the git hooks for pre-commit
 by running:
@@ -151,12 +161,22 @@ Tips:
 * To ignore the pre-commit message format check temporarily, start the commit
   message subject line with "WIP" (for "Work In Progress").
 
+Running pre-commit manually
+===========================
+
+Once pre-commit is installed as per the previous section it can be manually
+run against the MicroPython python codebase to update file formatting on
+demand, with either:
+* `pre-commit run --all-files` to fix all files in the MicroPython codebase
+* `pre-commit run --file ./path/to/my/file` to fix just one file
+* `pre-commit run --file ./path/to/my/folder/*` to fix just one folder
+
 Python code conventions
 =======================
 
 Python code follows [PEP 8](https://legacy.python.org/dev/peps/pep-0008/) and
-is auto-formatted using [black](https://github.com/psf/black) with a line-length
-of 99 characters.
+is auto-formatted using [ruff format](https://docs.astral.sh/ruff/formatter)
+with a line-length of 99 characters.
 
 Naming conventions:
 - Module names are short and all lowercase; eg pyb, stm.
@@ -177,14 +197,21 @@ adhere to the existing style and use `tools/codeformat.py` to check any changes.
 The main conventions, and things not enforceable via the auto-formatter, are
 described below.
 
-White space:
+As the MicroPython code base is over ten years old, not every source file
+conforms fully to these conventions. If making small changes to existing code,
+then it's usually acceptable to follow the existing code's style. New code or
+major changes should follow the conventions described here.
+
+## White space
+
 - Expand tabs to 4 spaces.
 - Don't leave trailing whitespace at the end of a line.
 - For control blocks (if, for, while), put 1 space between the
   keyword and the opening parenthesis.
 - Put 1 space after a comma, and 1 space around operators.
 
-Braces:
+## Braces
+
 - Use braces for all blocks, even no-line and single-line pieces of
   code.
 - Put opening braces on the end of the line it belongs to, not on
@@ -192,18 +219,43 @@ Braces:
 - For else-statements, put the else on the same line as the previous
   closing brace.
 
-Header files:
+## Header files
+
 - Header files should be protected from multiple inclusion with #if
   directives. See an existing header for naming convention.
 
-Names:
+## Names
+
 - Use underscore_case, not camelCase for all names.
 - Use CAPS_WITH_UNDERSCORE for enums and macros.
 - When defining a type use underscore_case and put '_t' after it.
 
-Integer types: MicroPython runs on 16, 32, and 64 bit machines, so it's
-important to use the correctly-sized (and signed) integer types.  The
-general guidelines are:
+### Public names (declared in headers)
+
+- MicroPython-specific names (especially any declared in `py/` and `extmod/`
+  directories) should generally start with `mp_` or `MP_`.
+- Functions and variables declared in a header should generally share a longer
+  common prefix. Usually the prefix matches the file name (i.e. items defined in
+  `py/obj.c` are declared in `py/obj.h` and should be prefixed `mp_obj_`). There
+  are exceptions, for example where one header file contains declarations
+  implemented in multiple source files for expediency.
+
+### Private names (specific to a single .c file)
+
+- For static functions and variables exposed to Python (i.e. a static C function
+  that is wrapped in `MP_DEFINE_CONST_FUN_...` and attached to a module), use
+  the file-level shared common prefix, i.e. name them as if the function or
+  variable was not static.
+- Other static definitions in source files (i.e. functions or variables defined
+  in a .c file that are only used within that .c file) don't need any prefix
+  (specifically: no `s_` or `_` prefix, and generally avoid adding the
+  file-level common prefix).
+
+## Integer types
+
+MicroPython runs on 16, 32, and 64 bit machines, so it's important to use the
+correctly-sized (and signed) integer types. The general guidelines are:
+
 - For most cases use mp_int_t for signed and mp_uint_t for unsigned
   integer values.  These are guaranteed to be machine-word sized and
   therefore big enough to hold the value from a MicroPython small-int
@@ -212,11 +264,13 @@ general guidelines are:
 - You can use int/uint, but remember that they may be 16-bits wide.
 - If in doubt, use mp_int_t/mp_uint_t.
 
-Comments:
+## Comments
+
 - Be concise and only write comments for things that are not obvious.
 - Use `// ` prefix, NOT `/* ... */`. No extra fluff.
 
-Memory allocation:
+## Memory allocation
+
 - Use m_new, m_renew, m_del (and friends) to allocate and free heap memory.
   These macros are defined in py/misc.h.
 

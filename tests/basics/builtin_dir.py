@@ -1,13 +1,17 @@
 # test builtin dir
 
+try:
+    dir
+except NameError:
+    print("SKIP")
+    raise SystemExit
+
+
 # dir of locals
 print('__name__' in dir())
 
 # dir of module
-try:
-    import usys as sys
-except ImportError:
-    import sys
+import sys
 print('version' in dir(sys))
 
 # dir of type

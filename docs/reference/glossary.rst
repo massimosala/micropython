@@ -32,7 +32,7 @@ Glossary
 
     callee-owned tuple
         This is a MicroPython-specific construct where, for efficiency
-        reasons, some built-in functions or methods may re-use the same
+        reasons, some built-in functions or methods may reuse the same
         underlying tuple object to return data. This avoids having to allocate
         a new tuple for every call, and reduces heap fragmentation. Programs
         should not hold references to callee-owned tuples and instead only
@@ -187,6 +187,13 @@ Glossary
         Python prompt, useful for debugging or testing short snippets of code.
         Most MicroPython boards make a REPL available over a UART, and this is
         typically accessible on a host PC via USB.
+
+    small integer
+        MicroPython optimises the internal representation of integers such that
+        "small" values do not take up space on the heap, and calculations with
+        them do not require heap allocation. On most 32-bit ports, this
+        corresponds to values in the interval ``-2**30 <= x < 2**30``, but this
+        should be considered an implementation detail and not relied upon.
 
     stream
         Also known as a "file-like object". A Python object which provides

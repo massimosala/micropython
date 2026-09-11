@@ -23,12 +23,17 @@ ifeq ($(CROSS), 1)
 DFU = $(TOP)/tools/dfu.py
 PYDFU = $(TOP)/tools/pydfu.py
 CFLAGS_CORTEX_M4 = -mthumb -mtune=cortex-m4 -mcpu=cortex-m4 -msoft-float -fsingle-precision-constant -Wdouble-promotion -Wfloat-conversion
-CFLAGS += $(INC) -Wall -Werror -std=c99 -nostdlib $(CFLAGS_CORTEX_M4) $(COPT)
+CFLAGS += $(INC) -Wall -Werror -std=c99 $(CFLAGS_CORTEX_M4) $(COPT)
 LDFLAGS += -nostdlib -T stm32f405.ld -Map=$@.map --cref --gc-sections
 else
+UNAME_S := $(shell uname -s)
 LD = $(CC)
 CFLAGS += $(INC) -Wall -Werror -Wdouble-promotion -Wfloat-conversion -std=c99 $(COPT)
+ifeq ($(UNAME_S),Linux)
 LDFLAGS += -Wl,-Map=$@.map,--cref -Wl,--gc-sections
+else ifeq ($(UNAME_S),Darwin)
+LDFLAGS += -Wl,-map,$@.map -Wl,-dead_strip
+endif
 endif
 
 CSUPEROPT = -Os # save some code space
@@ -41,9 +46,6 @@ else
 CFLAGS += -Os -DNDEBUG
 CFLAGS += -fdata-sections -ffunction-sections
 endif
-
-# Flags for optional C++ source code
-CXXFLAGS += $(filter-out -std=c99,$(CFLAGS))
 
 LIBS =
 
@@ -72,7 +74,7 @@ else
 all: $(BUILD)/firmware.elf
 endif
 
-$(BUILD)/_frozen_mpy.c: $(TOP)/tests/frozen/frozentest.mpy $(BUILD)/genhdr/qstrdefs.generated.h
+$(BUILD)/_frozen_mpy.c: $(TOP)/tests/assets/frozentest.mpy $(BUILD)/genhdr/qstrdefs.generated.h
 	$(ECHO) "MISC freezing bytecode"
 	$(Q)$(TOP)/tools/mpy-tool.py -f -q $(BUILD)/genhdr/qstrdefs.preprocessed.h -mlongint-impl=none $< > $@
 
@@ -101,6 +103,6 @@ run:
 	  stty $$saved_
 
 test: $(BUILD)/firmware.elf
-	$(Q)/bin/echo -e "print('hello world!', list(x+1 for x in range(10)), end='eol\\\\n')\\r\\n\\x04" | $(BUILD)/firmware.elf | tail -n2 | grep "^hello world! \\[1, 2, 3, 4, 5, 6, 7, 8, 9, 10\\]eol"
+	$(Q)/usr/bin/printf "print('hello world!', list(x+1 for x in range(10)), end='eol\\\\n')\\r\\n\\004" | $(BUILD)/firmware.elf | tail -n2 | grep "^hello world! \\[1, 2, 3, 4, 5, 6, 7, 8, 9, 10\\]eol"
 
 include $(TOP)/py/mkrules.mk

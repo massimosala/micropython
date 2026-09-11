@@ -74,13 +74,13 @@ mp_obj_t nrf_flashbdev_readblocks(size_t n_args, const mp_obj_t *args) {
 
     return MP_OBJ_NEW_SMALL_INT(0);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(nrf_flashbdev_readblocks_obj, 3, 4, nrf_flashbdev_readblocks);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(nrf_flashbdev_readblocks_obj, 3, 4, nrf_flashbdev_readblocks);
 
 mp_obj_t nrf_flashbdev_writeblocks(size_t n_args, const mp_obj_t *args) {
     nrf_flash_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     uint32_t block_num = mp_obj_get_int(args[1]);
     mp_buffer_info_t bufinfo;
-    mp_get_buffer_raise(args[2], &bufinfo, MP_BUFFER_WRITE);
+    mp_get_buffer_raise(args[2], &bufinfo, MP_BUFFER_READ);
 
     mp_int_t address = self->start + (block_num * FLASH_PAGESIZE);
 
@@ -95,7 +95,7 @@ mp_obj_t nrf_flashbdev_writeblocks(size_t n_args, const mp_obj_t *args) {
 
     return MP_OBJ_NEW_SMALL_INT(0);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(nrf_flashbdev_writeblocks_obj, 3, 4, nrf_flashbdev_writeblocks);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(nrf_flashbdev_writeblocks_obj, 3, 4, nrf_flashbdev_writeblocks);
 
 mp_obj_t nrf_flashbdev_ioctl(mp_obj_t self_in, mp_obj_t op_in, mp_obj_t arg_in) {
     nrf_flash_obj_t *self = MP_OBJ_TO_PTR(self_in);
@@ -137,21 +137,21 @@ mp_obj_t nrf_flashbdev_ioctl(mp_obj_t self_in, mp_obj_t op_in, mp_obj_t arg_in) 
             return mp_const_none;
     }
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_3(nrf_flashbdev_ioctl_obj, nrf_flashbdev_ioctl);
+static MP_DEFINE_CONST_FUN_OBJ_3(nrf_flashbdev_ioctl_obj, nrf_flashbdev_ioctl);
 
-STATIC const mp_rom_map_elem_t nrf_flashbdev_locals_dict_table[] = {
+static const mp_rom_map_elem_t nrf_flashbdev_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_readblocks), MP_ROM_PTR(&nrf_flashbdev_readblocks_obj) },
     { MP_ROM_QSTR(MP_QSTR_writeblocks), MP_ROM_PTR(&nrf_flashbdev_writeblocks_obj) },
     { MP_ROM_QSTR(MP_QSTR_ioctl), MP_ROM_PTR(&nrf_flashbdev_ioctl_obj) },
 };
-STATIC MP_DEFINE_CONST_DICT(nrf_flashbdev_locals_dict, nrf_flashbdev_locals_dict_table);
+static MP_DEFINE_CONST_DICT(nrf_flashbdev_locals_dict, nrf_flashbdev_locals_dict_table);
 
-STATIC void nrf_flashbdev_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
+static void nrf_flashbdev_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     nrf_flash_obj_t *self = MP_OBJ_TO_PTR(self_in);
     mp_printf(print, "Flash(start=0x%08x, len=%u)", self->start, self->len);
 }
 
-STATIC mp_obj_t nrf_flashbdev_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
+static mp_obj_t nrf_flashbdev_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
     // Parse arguments
     enum { ARG_start, ARG_len };
     static const mp_arg_t allowed_args[] = {
@@ -183,12 +183,26 @@ STATIC mp_obj_t nrf_flashbdev_make_new(const mp_obj_type_t *type, size_t n_args,
     return MP_OBJ_FROM_PTR(self);
 }
 
+static mp_int_t nrf_flashbdev_get_buffer(mp_obj_t self_in, mp_buffer_info_t *bufinfo, mp_uint_t flags) {
+    nrf_flash_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    if (flags == MP_BUFFER_READ) {
+        bufinfo->buf = (void *)self->start;
+        bufinfo->len = self->len;
+        bufinfo->typecode = 'B';
+        return 0;
+    } else {
+        // Unsupported.
+        return 1;
+    }
+}
+
 MP_DEFINE_CONST_OBJ_TYPE(
     nrf_flashbdev_type,
     MP_QSTR_Flash,
     MP_TYPE_FLAG_NONE,
     make_new, nrf_flashbdev_make_new,
     print, nrf_flashbdev_print,
+    buffer, nrf_flashbdev_get_buffer,
     locals_dict, &nrf_flashbdev_locals_dict
     );
 
@@ -201,5 +215,35 @@ void flashbdev_init(void) {
     mp_int_t num_pages = page_end - page_start;
     nrf_flash_obj.len = num_pages * FLASH_PAGESIZE;
 }
+
+#if MICROPY_VFS_ROM
+
+extern byte _micropy_hw_romfs_part0_start[];
+extern byte _micropy_hw_romfs_part0_size[];
+
+#define MICROPY_HW_ROMFS_BASE ((uint32_t)_micropy_hw_romfs_part0_start)
+#define MICROPY_HW_ROMFS_BYTES ((uint32_t)_micropy_hw_romfs_part0_size)
+
+static nrf_flash_obj_t nrf_flash_romfs_obj = {
+    .base = { &nrf_flashbdev_type },
+    .start = MICROPY_HW_ROMFS_BASE, // Get from MCU-Specific loader script.
+    .len = MICROPY_HW_ROMFS_BYTES, // Get from MCU-Specific loader script.
+};
+
+mp_obj_t mp_vfs_rom_ioctl(size_t n_args, const mp_obj_t *args) {
+    if (MICROPY_HW_ROMFS_BYTES <= 0) {
+        return MP_OBJ_NEW_SMALL_INT(-MP_EINVAL);
+    }
+    switch (mp_obj_get_int(args[0])) {
+        case MP_VFS_ROM_IOCTL_GET_NUMBER_OF_SEGMENTS:
+            return MP_OBJ_NEW_SMALL_INT(1);
+        case MP_VFS_ROM_IOCTL_GET_SEGMENT:
+            return MP_OBJ_FROM_PTR(&nrf_flash_romfs_obj);
+        default:
+            return MP_OBJ_NEW_SMALL_INT(-MP_EINVAL);
+    }
+}
+
+#endif // MICROPY_VFS_ROM
 
 #endif // MICROPY_PY_NRF && MICROPY_HW_ENABLE_INTERNAL_FLASH_STORAGE

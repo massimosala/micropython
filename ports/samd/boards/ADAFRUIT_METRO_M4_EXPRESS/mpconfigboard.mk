@@ -4,9 +4,10 @@ LD_FILES = boards/samd51x19a.ld sections.ld
 TEXT0 = 0x4000
 
 # MicroPython settings
-MICROPY_VFS_LFS1 ?= 1
-
 MICROPY_PY_NETWORK ?= 1
 MICROPY_PY_NETWORK_NINAW10 ?= 1
 
-BOARD_VARIANTS += "wlan"
+# The size of a MCU flash filesystem will be
+# 1008k - MICROPY_HW_CODESIZE - MICROPY_HW_ROMFS_BYTES
+# The default for MICROPY_HW_ROMFS_BYTES is 64K
+MICROPY_HW_CODESIZE ?= 432K

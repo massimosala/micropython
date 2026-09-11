@@ -42,7 +42,6 @@ The basic MicroPython firmware is implemented in the main port file, e.g ``main.
    #include "py/compile.h"
    #include "py/gc.h"
    #include "py/mperrno.h"
-   #include "py/stackctrl.h"
    #include "shared/runtime/gchelper.h"
    #include "shared/runtime/pyexec.h"
 
@@ -51,7 +50,7 @@ The basic MicroPython firmware is implemented in the main port file, e.g ``main.
 
    int main(int argc, char **argv) {
        // Initialise the MicroPython runtime.
-       mp_stack_ctrl_init();
+       mp_cstack_init_with_sp_here(2048);
        gc_init(heap, heap + sizeof(heap));
        mp_init();
 
@@ -83,7 +82,7 @@ The basic MicroPython firmware is implemented in the main port file, e.g ``main.
    }
 
    // There is no filesystem so opening a file raises an exception.
-   mp_lexer_t *mp_lexer_new_from_file(const char *filename) {
+   mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
        mp_raise_OSError(MP_ENOENT);
    }
 
@@ -151,9 +150,6 @@ The following is an example of an ``mpconfigport.h`` file:
    #define MICROPY_ERROR_REPORTING                 (MICROPY_ERROR_REPORTING_TERSE)
    #define MICROPY_FLOAT_IMPL                      (MICROPY_FLOAT_IMPL_FLOAT)
 
-   // Enable u-modules to be imported with their standard name, like sys.
-   #define MICROPY_MODULE_WEAK_LINKS               (1)
-
    // Fine control over Python builtins, classes, modules, etc.
    #define MICROPY_PY_ASYNC_AWAIT                  (0)
    #define MICROPY_PY_BUILTINS_SET                 (0)
@@ -165,8 +161,6 @@ The following is an example of an ``mpconfigport.h`` file:
 
    // Type definitions for the specific machine.
 
-   typedef intptr_t mp_int_t; // must be pointer size
-   typedef uintptr_t mp_uint_t; // must be pointer size
    typedef long mp_off_t;
 
    // We need to provide a declaration/definition of alloca().
@@ -247,10 +241,12 @@ That should give a MicroPython REPL.  You can then run commands like:
 
 .. code-block:: bash
 
-   MicroPython v1.13 on 2021-01-01; example-board with unknown-cpu
-   >>> import sys
-   >>> sys.implementation
-   ('micropython', (1, 13, 0))
+   MicroPython v1.26.0-preview on 2025-08-01; minimal with unknown-cpu
+   >>> def sum(n, m):
+   ...     return n + m
+   ...
+   >>> 3, 4, sum(3, 4)
+   (3, 4, 7)
    >>>
 
 Use Ctrl-D to exit, and then run ``reset`` to reset the terminal.
@@ -265,17 +261,17 @@ To add a custom module like ``myport``, first add the module definition in a fil
 
    #include "py/runtime.h"
 
-   STATIC mp_obj_t myport_info(void) {
+   static mp_obj_t myport_info(void) {
        mp_printf(&mp_plat_print, "info about my port\n");
        return mp_const_none;
    }
-   STATIC MP_DEFINE_CONST_FUN_OBJ_0(myport_info_obj, myport_info);
+   static MP_DEFINE_CONST_FUN_OBJ_0(myport_info_obj, myport_info);
 
-   STATIC const mp_rom_map_elem_t myport_module_globals_table[] = {
+   static const mp_rom_map_elem_t myport_module_globals_table[] = {
        { MP_OBJ_NEW_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(MP_QSTR_myport) },
        { MP_ROM_QSTR(MP_QSTR_info), MP_ROM_PTR(&myport_info_obj) },
    };
-   STATIC MP_DEFINE_CONST_DICT(myport_module_globals, myport_module_globals_table);
+   static MP_DEFINE_CONST_DICT(myport_module_globals, myport_module_globals_table);
 
    const mp_obj_module_t myport_module = {
        .base = { &mp_type_module },

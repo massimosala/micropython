@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "py/runtime.h"
+#include "py/mperrno.h"
 #include "py/mphal.h"
 #include "lib/oofatfs/ff.h"
 #include "extmod/vfs_fat.h"
@@ -38,9 +39,18 @@
 #include "dma.h"
 #include "irq.h"
 
+#if !BUILDING_MBOOT
+#include "usbd_msc_interface.h"
+#else
+// For mboot, act like the SDCard is always exposed via USB MSC
+inline static bool usbd_msc_lu_includes_sdcard(void) {
+    return true;
+}
+#endif // !BUILDING_MBOOT
+
 #if MICROPY_HW_ENABLE_SDCARD || MICROPY_HW_ENABLE_MMCARD
 
-#if defined(STM32F7) || defined(STM32H7) || defined(STM32L4)
+#if defined(STM32F7) || defined(STM32H5) || defined(STM32H7) || defined(STM32L4) || defined(STM32N6)
 
 // The H7/F7/L4 have 2 SDMMC peripherals, but at the moment this driver only supports
 // using one of them in a given build, selected by MICROPY_HW_SDCARD_SDMMC.
@@ -104,8 +114,8 @@
 #define SDIO_HARDWARE_FLOW_CONTROL_DISABLE  SDMMC_HARDWARE_FLOW_CONTROL_DISABLE
 #define SDIO_HARDWARE_FLOW_CONTROL_ENABLE   SDMMC_HARDWARE_FLOW_CONTROL_ENABLE
 
-#if defined(STM32H7)
-#define SDIO_TRANSFER_CLK_DIV               SDMMC_NSpeed_CLK_DIV
+#if defined(STM32H5) || defined(STM32H7) || defined(STM32N6)
+#define SDIO_TRANSFER_CLK_DIV               SDMMC_HSPEED_CLK_DIV
 #define SDIO_USE_GPDMA                      0
 #else
 #define SDIO_TRANSFER_CLK_DIV               SDMMC_TRANSFER_CLK_DIV
@@ -158,6 +168,8 @@
 
 static uint8_t pyb_sdmmc_flags;
 
+#define TIMEOUT_MS 30000
+
 // TODO: I think that as an optimization, we can allocate these dynamically
 //       if an sd card is detected. This will save approx 260 bytes of RAM
 //       when no sdcard was being used.
@@ -208,11 +220,11 @@ void sdcard_select_mmc(void) {
     pyb_sdmmc_flags |= PYB_SDMMC_FLAG_MMC;
 }
 
-STATIC void sdmmc_msp_init(void) {
+static void sdmmc_msp_init(void) {
     // enable SDIO clock
     SDMMC_CLK_ENABLE();
 
-    #if defined(STM32H7)
+    #if defined(STM32H7) || defined(STM32N6)
     // Reset SDMMC
     SDMMC_FORCE_RESET();
     SDMMC_RELEASE_RESET();
@@ -264,11 +276,11 @@ bool sdcard_is_present(void) {
 }
 
 #if MICROPY_HW_ENABLE_SDCARD
-STATIC HAL_StatusTypeDef sdmmc_init_sd(void) {
+static HAL_StatusTypeDef sdmmc_init_sd(void) {
     // SD device interface configuration
     sdmmc_handle.sd.Instance = SDIO;
     sdmmc_handle.sd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
-    #ifndef STM32H7
+    #if !defined(STM32H5) && !defined(STM32H7) && !defined(STM32N6)
     sdmmc_handle.sd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
     #endif
     sdmmc_handle.sd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_ENABLE;
@@ -299,7 +311,7 @@ STATIC HAL_StatusTypeDef sdmmc_init_sd(void) {
 #endif
 
 #if MICROPY_HW_ENABLE_MMCARD
-STATIC HAL_StatusTypeDef sdmmc_init_mmc(void) {
+static HAL_StatusTypeDef sdmmc_init_mmc(void) {
     // MMC device interface configuration
     sdmmc_handle.mmc.Instance = SDIO;
     sdmmc_handle.mmc.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
@@ -410,7 +422,7 @@ uint64_t sdcard_get_capacity_in_bytes(void) {
     }
 }
 
-STATIC void sdmmc_irq_handler(void) {
+static void sdmmc_irq_handler(void) {
     switch (pyb_sdmmc_flags) {
         #if MICROPY_HW_ENABLE_SDCARD
         case PYB_SDMMC_FLAG_ACTIVE | PYB_SDMMC_FLAG_SD:
@@ -431,7 +443,7 @@ void SDMMC_IRQHandler(void) {
     IRQ_EXIT(SDMMC_IRQn);
 }
 
-STATIC void sdcard_reset_periph(void) {
+static void sdcard_reset_periph(void) {
     // Fully reset the SDMMC peripheral before calling HAL SD DMA functions.
     // (There could be an outstanding DTIMEOUT event from a previous call and the
     // HAL function enables IRQs before fully configuring the SDMMC peripheral.)
@@ -441,7 +453,7 @@ STATIC void sdcard_reset_periph(void) {
     SDIO->ICR = SDMMC_STATIC_FLAGS;
 }
 
-STATIC HAL_StatusTypeDef sdcard_wait_finished(uint32_t timeout) {
+static HAL_StatusTypeDef sdcard_wait_finished(void) {
     // Wait for HAL driver to be ready (eg for DMA to finish)
     uint32_t start = HAL_GetTick();
     for (;;) {
@@ -463,7 +475,7 @@ STATIC HAL_StatusTypeDef sdcard_wait_finished(uint32_t timeout) {
         }
         __WFI();
         enable_irq(irq_state);
-        if (HAL_GetTick() - start >= timeout) {
+        if (HAL_GetTick() - start >= TIMEOUT_MS) {
             return HAL_TIMEOUT;
         }
     }
@@ -490,7 +502,7 @@ STATIC HAL_StatusTypeDef sdcard_wait_finished(uint32_t timeout) {
         if (!(state == HAL_SD_CARD_SENDING || state == HAL_SD_CARD_RECEIVING || state == HAL_SD_CARD_PROGRAMMING)) {
             return HAL_ERROR;
         }
-        if (HAL_GetTick() - start >= timeout) {
+        if (HAL_GetTick() - start >= TIMEOUT_MS) {
             return HAL_TIMEOUT;
         }
         __WFI();
@@ -498,13 +510,27 @@ STATIC HAL_StatusTypeDef sdcard_wait_finished(uint32_t timeout) {
     return HAL_OK;
 }
 
-mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blocks) {
+static int sdcard_common_checks(uint32_t block_num, uint32_t num_blocks) {
     // check that SD card is initialised
     if (!(pyb_sdmmc_flags & PYB_SDMMC_FLAG_ACTIVE)) {
-        return HAL_ERROR;
+        return -MP_EIO;
     }
 
-    HAL_StatusTypeDef err = HAL_OK;
+    // check that adding block_num & num_blocks don't overflow
+    // (the ST HAL does a bounds check, but only after adding them...)
+    uint32_t end_block;
+    if (__builtin_add_overflow(block_num, num_blocks, &end_block)) {
+        return -MP_EIO;
+    }
+
+    return 0;
+}
+
+int sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blocks) {
+    int ret = sdcard_common_checks(block_num, num_blocks);
+    if (ret != 0) {
+        return ret;
+    }
 
     // check that dest pointer is aligned on a 4-byte boundary
     uint8_t *orig_dest = NULL;
@@ -524,9 +550,17 @@ mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blo
         saved_word = *(uint32_t *)dest;
     }
 
+    HAL_StatusTypeDef err = HAL_OK;
+
     if (query_irq() == IRQ_STATE_ENABLED) {
-        // we must disable USB irqs to prevent MSC contention with SD card
-        uint32_t basepri = raise_irq_pri(IRQ_PRI_OTG_FS);
+        #if MICROPY_HW_USB_MSC
+        uint32_t basepri;
+        bool usb_msc_sdcard = usbd_msc_lu_includes_sdcard();
+        if (usb_msc_sdcard) {
+            // we must disable USB irqs to prevent MSC contention with SD card
+            basepri = raise_irq_pri(IRQ_PRI_OTG_FS);
+        }
+        #endif
 
         #if SDIO_USE_GPDMA
         DMA_HandleTypeDef sd_dma;
@@ -543,7 +577,7 @@ mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blo
 
         // make sure cache is flushed and invalidated so when DMA updates the RAM
         // from reading the peripheral the CPU then reads the new data
-        MP_HAL_CLEANINVALIDATE_DCACHE(dest, num_blocks * SDCARD_BLOCK_SIZE);
+        dma_protect_rx_region(dest, num_blocks * SDCARD_BLOCK_SIZE);
 
         sdcard_reset_periph();
         #if MICROPY_HW_ENABLE_MMCARD
@@ -555,8 +589,10 @@ mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blo
             err = HAL_SD_ReadBlocks_DMA(&sdmmc_handle.sd, dest, block_num, num_blocks);
         }
         if (err == HAL_OK) {
-            err = sdcard_wait_finished(60000);
+            err = sdcard_wait_finished();
         }
+
+        dma_unprotect_rx_region(dest, num_blocks * SDCARD_BLOCK_SIZE);
 
         #if SDIO_USE_GPDMA
         dma_deinit(&SDMMC_DMA);
@@ -570,18 +606,22 @@ mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blo
         }
         #endif
 
-        restore_irq_pri(basepri);
+        #if MICROPY_HW_USB_MSC
+        if (usb_msc_sdcard) {
+            restore_irq_pri(basepri);
+        }
+        #endif
     } else {
         #if MICROPY_HW_ENABLE_MMCARD
         if (pyb_sdmmc_flags & PYB_SDMMC_FLAG_MMC) {
-            err = HAL_MMC_ReadBlocks(&sdmmc_handle.mmc, dest, block_num, num_blocks, 60000);
+            err = HAL_MMC_ReadBlocks(&sdmmc_handle.mmc, dest, block_num, num_blocks, TIMEOUT_MS);
         } else
         #endif
         {
-            err = HAL_SD_ReadBlocks(&sdmmc_handle.sd, dest, block_num, num_blocks, 60000);
+            err = HAL_SD_ReadBlocks(&sdmmc_handle.sd, dest, block_num, num_blocks, TIMEOUT_MS);
         }
         if (err == HAL_OK) {
-            err = sdcard_wait_finished(60000);
+            err = sdcard_wait_finished();
         }
     }
 
@@ -591,38 +631,44 @@ mp_uint_t sdcard_read_blocks(uint8_t *dest, uint32_t block_num, uint32_t num_blo
         memcpy(dest, &saved_word, orig_dest - dest);
     }
 
-    return err;
+    return mp_hal_status_to_neg_errno(err);
 }
 
-mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t num_blocks) {
-    // check that SD card is initialised
-    if (!(pyb_sdmmc_flags & PYB_SDMMC_FLAG_ACTIVE)) {
-        return HAL_ERROR;
+int sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t num_blocks) {
+    int ret = sdcard_common_checks(block_num, num_blocks);
+    if (ret != 0) {
+        return ret;
     }
-
-    HAL_StatusTypeDef err = HAL_OK;
 
     // check that src pointer is aligned on a 4-byte boundary
     if (((uint32_t)src & 3) != 0) {
         // pointer is not aligned, so allocate a temporary block to do the write
         uint8_t *src_aligned = m_new_maybe(uint8_t, SDCARD_BLOCK_SIZE);
         if (src_aligned == NULL) {
-            return HAL_ERROR;
+            return -MP_EIO;
         }
         for (size_t i = 0; i < num_blocks; ++i) {
             memcpy(src_aligned, src + i * SDCARD_BLOCK_SIZE, SDCARD_BLOCK_SIZE);
-            err = sdcard_write_blocks(src_aligned, block_num + i, 1);
-            if (err != HAL_OK) {
+            ret = sdcard_write_blocks(src_aligned, block_num + i, 1);
+            if (ret != 0) {
                 break;
             }
         }
         m_del(uint8_t, src_aligned, SDCARD_BLOCK_SIZE);
-        return err;
+        return ret;
     }
 
+    HAL_StatusTypeDef err = HAL_OK;
+
     if (query_irq() == IRQ_STATE_ENABLED) {
-        // we must disable USB irqs to prevent MSC contention with SD card
-        uint32_t basepri = raise_irq_pri(IRQ_PRI_OTG_FS);
+        #if MICROPY_HW_USB_MSC
+        uint32_t basepri;
+        bool usb_msc_sdcard = usbd_msc_lu_includes_sdcard();
+        if (usb_msc_sdcard) {
+            // we must disable USB irqs to prevent MSC contention with SD card
+            basepri = raise_irq_pri(IRQ_PRI_OTG_FS);
+        }
+        #endif
 
         #if SDIO_USE_GPDMA
         DMA_HandleTypeDef sd_dma;
@@ -650,7 +696,7 @@ mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t n
             err = HAL_SD_WriteBlocks_DMA(&sdmmc_handle.sd, (uint8_t *)src, block_num, num_blocks);
         }
         if (err == HAL_OK) {
-            err = sdcard_wait_finished(60000);
+            err = sdcard_wait_finished();
         }
 
         #if SDIO_USE_GPDMA
@@ -665,22 +711,26 @@ mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t n
         }
         #endif
 
-        restore_irq_pri(basepri);
+        #if MICROPY_HW_USB_MSC
+        if (usb_msc_sdcard) {
+            restore_irq_pri(basepri);
+        }
+        #endif
     } else {
         #if MICROPY_HW_ENABLE_MMCARD
         if (pyb_sdmmc_flags & PYB_SDMMC_FLAG_MMC) {
-            err = HAL_MMC_WriteBlocks(&sdmmc_handle.mmc, (uint8_t *)src, block_num, num_blocks, 60000);
+            err = HAL_MMC_WriteBlocks(&sdmmc_handle.mmc, (uint8_t *)src, block_num, num_blocks, TIMEOUT_MS);
         } else
         #endif
         {
-            err = HAL_SD_WriteBlocks(&sdmmc_handle.sd, (uint8_t *)src, block_num, num_blocks, 60000);
+            err = HAL_SD_WriteBlocks(&sdmmc_handle.sd, (uint8_t *)src, block_num, num_blocks, TIMEOUT_MS);
         }
         if (err == HAL_OK) {
-            err = sdcard_wait_finished(60000);
+            err = sdcard_wait_finished();
         }
     }
 
-    return err;
+    return mp_hal_status_to_neg_errno(err);
 }
 
 /******************************************************************************/
@@ -692,14 +742,14 @@ mp_uint_t sdcard_write_blocks(const uint8_t *src, uint32_t block_num, uint32_t n
 
 // There are singleton SDCard/MMCard objects
 #if MICROPY_HW_ENABLE_SDCARD
-const mp_obj_base_t pyb_sdcard_obj = {&pyb_sdcard_type};
+const mp_obj_base_t pyb_sdcard_obj = {&machine_sdcard_type};
 #endif
 #if MICROPY_HW_ENABLE_MMCARD
 const mp_obj_base_t pyb_mmcard_obj = {&pyb_mmcard_type};
 #endif
 
 #if MICROPY_HW_ENABLE_SDCARD
-STATIC mp_obj_t pyb_sdcard_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+static mp_obj_t pyb_sdcard_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     // check arguments
     mp_arg_check_num(n_args, n_kw, 0, 0, false);
 
@@ -717,7 +767,7 @@ STATIC mp_obj_t pyb_sdcard_make_new(const mp_obj_type_t *type, size_t n_args, si
 #endif
 
 #if MICROPY_HW_ENABLE_MMCARD
-STATIC mp_obj_t pyb_mmcard_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+static mp_obj_t pyb_mmcard_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     // check arguments
     mp_arg_check_num(n_args, n_kw, 0, 0, false);
 
@@ -734,12 +784,12 @@ STATIC mp_obj_t pyb_mmcard_make_new(const mp_obj_type_t *type, size_t n_args, si
 }
 #endif
 
-STATIC mp_obj_t sd_present(mp_obj_t self) {
+static mp_obj_t sd_present(mp_obj_t self) {
     return mp_obj_new_bool(sdcard_is_present());
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_1(sd_present_obj, sd_present);
+static MP_DEFINE_CONST_FUN_OBJ_1(sd_present_obj, sd_present);
 
-STATIC mp_obj_t sd_power(mp_obj_t self, mp_obj_t state) {
+static mp_obj_t sd_power(mp_obj_t self, mp_obj_t state) {
     bool result;
     if (mp_obj_is_true(state)) {
         result = sdcard_power_on();
@@ -749,9 +799,9 @@ STATIC mp_obj_t sd_power(mp_obj_t self, mp_obj_t state) {
     }
     return mp_obj_new_bool(result);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_2(sd_power_obj, sd_power);
+static MP_DEFINE_CONST_FUN_OBJ_2(sd_power_obj, sd_power);
 
-STATIC mp_obj_t sd_info(mp_obj_t self) {
+static mp_obj_t sd_info(mp_obj_t self) {
     if (!(pyb_sdmmc_flags & PYB_SDMMC_FLAG_ACTIVE)) {
         return mp_const_none;
     }
@@ -778,57 +828,57 @@ STATIC mp_obj_t sd_info(mp_obj_t self) {
     };
     return mp_obj_new_tuple(3, tuple);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_1(sd_info_obj, sd_info);
+static MP_DEFINE_CONST_FUN_OBJ_1(sd_info_obj, sd_info);
 
 // now obsolete, kept for backwards compatibility
-STATIC mp_obj_t sd_read(mp_obj_t self, mp_obj_t block_num) {
+static mp_obj_t sd_read(mp_obj_t self, mp_obj_t block_num) {
     uint8_t *dest = m_new(uint8_t, SDCARD_BLOCK_SIZE);
-    mp_uint_t ret = sdcard_read_blocks(dest, mp_obj_get_int(block_num), 1);
+    int ret = sdcard_read_blocks(dest, mp_obj_get_int(block_num), 1);
 
     if (ret != 0) {
         m_del(uint8_t, dest, SDCARD_BLOCK_SIZE);
-        mp_raise_msg_varg(&mp_type_Exception, MP_ERROR_TEXT("sdcard_read_blocks failed [%u]"), ret);
+        mp_raise_msg_varg(&mp_type_Exception, MP_ERROR_TEXT("sdcard_read_blocks failed [%d]"), ret);
     }
 
     return mp_obj_new_bytearray_by_ref(SDCARD_BLOCK_SIZE, dest);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_2(sd_read_obj, sd_read);
+static MP_DEFINE_CONST_FUN_OBJ_2(sd_read_obj, sd_read);
 
 // now obsolete, kept for backwards compatibility
-STATIC mp_obj_t sd_write(mp_obj_t self, mp_obj_t block_num, mp_obj_t data) {
+static mp_obj_t sd_write(mp_obj_t self, mp_obj_t block_num, mp_obj_t data) {
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(data, &bufinfo, MP_BUFFER_READ);
     if (bufinfo.len % SDCARD_BLOCK_SIZE != 0) {
         mp_raise_msg_varg(&mp_type_ValueError, MP_ERROR_TEXT("writes must be a multiple of %d bytes"), SDCARD_BLOCK_SIZE);
     }
 
-    mp_uint_t ret = sdcard_write_blocks(bufinfo.buf, mp_obj_get_int(block_num), bufinfo.len / SDCARD_BLOCK_SIZE);
+    int ret = sdcard_write_blocks(bufinfo.buf, mp_obj_get_int(block_num), bufinfo.len / SDCARD_BLOCK_SIZE);
 
     if (ret != 0) {
-        mp_raise_msg_varg(&mp_type_Exception, MP_ERROR_TEXT("sdcard_write_blocks failed [%u]"), ret);
+        mp_raise_msg_varg(&mp_type_Exception, MP_ERROR_TEXT("sdcard_write_blocks failed [%d]"), ret);
     }
 
     return mp_const_none;
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_3(sd_write_obj, sd_write);
+static MP_DEFINE_CONST_FUN_OBJ_3(sd_write_obj, sd_write);
 
-STATIC mp_obj_t pyb_sdcard_readblocks(mp_obj_t self, mp_obj_t block_num, mp_obj_t buf) {
+static mp_obj_t pyb_sdcard_readblocks(mp_obj_t self, mp_obj_t block_num, mp_obj_t buf) {
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(buf, &bufinfo, MP_BUFFER_WRITE);
-    mp_uint_t ret = sdcard_read_blocks(bufinfo.buf, mp_obj_get_int(block_num), bufinfo.len / SDCARD_BLOCK_SIZE);
-    return mp_obj_new_bool(ret == 0);
+    int ret = sdcard_read_blocks(bufinfo.buf, mp_obj_get_int(block_num), bufinfo.len / SDCARD_BLOCK_SIZE);
+    return MP_OBJ_NEW_SMALL_INT(ret);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_3(pyb_sdcard_readblocks_obj, pyb_sdcard_readblocks);
+static MP_DEFINE_CONST_FUN_OBJ_3(pyb_sdcard_readblocks_obj, pyb_sdcard_readblocks);
 
-STATIC mp_obj_t pyb_sdcard_writeblocks(mp_obj_t self, mp_obj_t block_num, mp_obj_t buf) {
+static mp_obj_t pyb_sdcard_writeblocks(mp_obj_t self, mp_obj_t block_num, mp_obj_t buf) {
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(buf, &bufinfo, MP_BUFFER_READ);
-    mp_uint_t ret = sdcard_write_blocks(bufinfo.buf, mp_obj_get_int(block_num), bufinfo.len / SDCARD_BLOCK_SIZE);
-    return mp_obj_new_bool(ret == 0);
+    int ret = sdcard_write_blocks(bufinfo.buf, mp_obj_get_int(block_num), bufinfo.len / SDCARD_BLOCK_SIZE);
+    return MP_OBJ_NEW_SMALL_INT(ret);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_3(pyb_sdcard_writeblocks_obj, pyb_sdcard_writeblocks);
+static MP_DEFINE_CONST_FUN_OBJ_3(pyb_sdcard_writeblocks_obj, pyb_sdcard_writeblocks);
 
-STATIC mp_obj_t pyb_sdcard_ioctl(mp_obj_t self, mp_obj_t cmd_in, mp_obj_t arg_in) {
+static mp_obj_t pyb_sdcard_ioctl(mp_obj_t self, mp_obj_t cmd_in, mp_obj_t arg_in) {
     mp_int_t cmd = mp_obj_get_int(cmd_in);
     switch (cmd) {
         case MP_BLOCKDEV_IOCTL_INIT:
@@ -855,9 +905,9 @@ STATIC mp_obj_t pyb_sdcard_ioctl(mp_obj_t self, mp_obj_t cmd_in, mp_obj_t arg_in
             return MP_OBJ_NEW_SMALL_INT(-1); // error
     }
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_3(pyb_sdcard_ioctl_obj, pyb_sdcard_ioctl);
+static MP_DEFINE_CONST_FUN_OBJ_3(pyb_sdcard_ioctl_obj, pyb_sdcard_ioctl);
 
-STATIC const mp_rom_map_elem_t pyb_sdcard_locals_dict_table[] = {
+static const mp_rom_map_elem_t pyb_sdcard_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_present), MP_ROM_PTR(&sd_present_obj) },
     { MP_ROM_QSTR(MP_QSTR_power), MP_ROM_PTR(&sd_power_obj) },
     { MP_ROM_QSTR(MP_QSTR_info), MP_ROM_PTR(&sd_info_obj) },
@@ -869,11 +919,11 @@ STATIC const mp_rom_map_elem_t pyb_sdcard_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_ioctl), MP_ROM_PTR(&pyb_sdcard_ioctl_obj) },
 };
 
-STATIC MP_DEFINE_CONST_DICT(pyb_sdcard_locals_dict, pyb_sdcard_locals_dict_table);
+static MP_DEFINE_CONST_DICT(pyb_sdcard_locals_dict, pyb_sdcard_locals_dict_table);
 
 #if MICROPY_HW_ENABLE_SDCARD
 MP_DEFINE_CONST_OBJ_TYPE(
-    pyb_sdcard_type,
+    machine_sdcard_type,
     MP_QSTR_SDCard,
     MP_TYPE_FLAG_NONE,
     make_new, pyb_sdcard_make_new,

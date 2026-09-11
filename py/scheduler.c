@@ -26,6 +26,7 @@
 
 #include <stdio.h>
 
+#include "py/mphal.h"
 #include "py/runtime.h"
 
 // Schedules an exception on the main thread (for exceptions "thrown" by async
@@ -87,17 +88,21 @@ static inline void mp_sched_run_pending(void) {
 
     #if MICROPY_SCHEDULER_STATIC_NODES
     // Run all pending C callbacks.
-    while (MP_STATE_VM(sched_head) != NULL) {
-        mp_sched_node_t *node = MP_STATE_VM(sched_head);
-        MP_STATE_VM(sched_head) = node->next;
-        if (MP_STATE_VM(sched_head) == NULL) {
-            MP_STATE_VM(sched_tail) = NULL;
-        }
-        mp_sched_callback_t callback = node->callback;
-        node->callback = NULL;
-        MICROPY_END_ATOMIC_SECTION(atomic_state);
-        callback(node);
-        atomic_state = MICROPY_BEGIN_ATOMIC_SECTION();
+    mp_sched_node_t *original_tail = MP_STATE_VM(sched_tail);
+    if (original_tail != NULL) {
+        mp_sched_node_t *node;
+        do {
+            node = MP_STATE_VM(sched_head);
+            MP_STATE_VM(sched_head) = node->next;
+            if (MP_STATE_VM(sched_head) == NULL) {
+                MP_STATE_VM(sched_tail) = NULL;
+            }
+            mp_sched_callback_t callback = node->callback;
+            node->callback = NULL;
+            MICROPY_END_ATOMIC_SECTION(atomic_state);
+            callback(node);
+            atomic_state = MICROPY_BEGIN_ATOMIC_SECTION();
+        } while (node != original_tail); // Don't execute any callbacks scheduled during this run
     }
     #endif
 
@@ -208,24 +213,27 @@ MP_REGISTER_ROOT_POINTER(mp_sched_item_t sched_queue[MICROPY_SCHEDULER_DEPTH]);
 
 // Called periodically from the VM or from "waiting" code (e.g. sleep) to
 // process background tasks and pending exceptions (e.g. KeyboardInterrupt).
-void mp_handle_pending(bool raise_exc) {
+void mp_handle_pending(mp_handle_pending_behaviour_t behavior) {
+    bool handle_exceptions = (behavior != MP_HANDLE_PENDING_CALLBACKS_ONLY);
+    bool raise_exceptions = (behavior == MP_HANDLE_PENDING_CALLBACKS_AND_EXCEPTIONS);
+
     // Handle pending VM abort.
     #if MICROPY_ENABLE_VM_ABORT
-    if (MP_STATE_VM(vm_abort) && mp_thread_is_main_thread()) {
+    if (handle_exceptions && MP_STATE_VM(vm_abort) && mp_thread_is_main_thread()) {
         MP_STATE_VM(vm_abort) = false;
-        if (raise_exc && nlr_get_abort() != NULL) {
+        if (raise_exceptions && nlr_get_abort() != NULL) {
             nlr_jump_abort();
         }
     }
     #endif
 
     // Handle any pending exception.
-    if (MP_STATE_THREAD(mp_pending_exception) != MP_OBJ_NULL) {
+    if (handle_exceptions && MP_STATE_THREAD(mp_pending_exception) != MP_OBJ_NULL) {
         mp_uint_t atomic_state = MICROPY_BEGIN_ATOMIC_SECTION();
         mp_obj_t obj = MP_STATE_THREAD(mp_pending_exception);
         if (obj != MP_OBJ_NULL) {
             MP_STATE_THREAD(mp_pending_exception) = MP_OBJ_NULL;
-            if (raise_exc) {
+            if (raise_exceptions) {
                 MICROPY_END_ATOMIC_SECTION(atomic_state);
                 nlr_raise(obj);
             }
@@ -235,8 +243,50 @@ void mp_handle_pending(bool raise_exc) {
 
     // Handle any pending callbacks.
     #if MICROPY_ENABLE_SCHEDULER
-    if (MP_STATE_VM(sched_state) == MP_SCHED_PENDING) {
+    bool run_scheduler = (MP_STATE_VM(sched_state) == MP_SCHED_PENDING);
+    #if MICROPY_PY_THREAD && !MICROPY_PY_THREAD_GIL
+    // Avoid races by running the scheduler on the main thread, only.
+    // (Not needed if GIL enabled, as GIL ensures thread safety here.)
+    run_scheduler = run_scheduler && mp_thread_is_main_thread();
+    #endif
+    if (run_scheduler) {
         mp_sched_run_pending();
     }
+    #endif
+}
+
+// Handles any pending MicroPython events without waiting for an interrupt or event.
+void mp_event_handle_nowait(void) {
+    #if defined(MICROPY_EVENT_POLL_HOOK_FAST) && !MICROPY_PREVIEW_VERSION_2
+    // For ports still using the old macros.
+    MICROPY_EVENT_POLL_HOOK_FAST
+    #else
+    // Process any port layer (non-blocking) events.
+    MICROPY_INTERNAL_EVENT_HOOK;
+    mp_handle_pending(MP_HANDLE_PENDING_CALLBACKS_AND_EXCEPTIONS);
+    #endif
+}
+
+// Handles any pending MicroPython events and then suspends execution until the
+// next interrupt or event.
+void mp_event_wait_indefinite(void) {
+    #if defined(MICROPY_EVENT_POLL_HOOK) && !MICROPY_PREVIEW_VERSION_2
+    // For ports still using the old macros.
+    MICROPY_EVENT_POLL_HOOK
+    #else
+    mp_event_handle_nowait();
+    MICROPY_INTERNAL_WFE(-1);
+    #endif
+}
+
+// Handle any pending MicroPython events and then suspends execution until the
+// next interrupt or event, or until timeout_ms milliseconds have elapsed.
+void mp_event_wait_ms(mp_uint_t timeout_ms) {
+    #if defined(MICROPY_EVENT_POLL_HOOK) && !MICROPY_PREVIEW_VERSION_2
+    // For ports still using the old macros.
+    MICROPY_EVENT_POLL_HOOK
+    #else
+    mp_event_handle_nowait();
+    MICROPY_INTERNAL_WFE(timeout_ms);
     #endif
 }

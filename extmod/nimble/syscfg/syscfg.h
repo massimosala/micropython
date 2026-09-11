@@ -17,7 +17,7 @@ void *nimble_realloc(void *ptr, size_t size);
 int nimble_sprintf(char *str, const char *fmt, ...);
 #define sprintf(str, fmt, ...) nimble_sprintf(str, fmt, __VA_ARGS__)
 
-#define MYNEWT_VAL(x) MYNEWT_VAL_ ## x
+#define MYNEWT_VAL(x) MYNEWT_VAL_##x
 
 #define MYNEWT_VAL_LOG_LEVEL (255)
 
@@ -134,7 +134,11 @@ int nimble_sprintf(char *str, const char *fmt, ...);
 #define MYNEWT_VAL_BLE_SVC_GAP_APPEARANCE (0)
 #define MYNEWT_VAL_BLE_SVC_GAP_APPEARANCE_WRITE_PERM (-1)
 #define MYNEWT_VAL_BLE_SVC_GAP_CENTRAL_ADDRESS_RESOLUTION (-1)
-#define MYNEWT_VAL_BLE_SVC_GAP_DEVICE_NAME ("pybd")
+#ifdef MICROPY_PY_BLUETOOTH_DEFAULT_GAP_NAME
+#define MYNEWT_VAL_BLE_SVC_GAP_DEVICE_NAME (MICROPY_PY_BLUETOOTH_DEFAULT_GAP_NAME)
+#else
+#define MYNEWT_VAL_BLE_SVC_GAP_DEVICE_NAME ("MPY NIMBLE")
+#endif
 #define MYNEWT_VAL_BLE_SVC_GAP_DEVICE_NAME_MAX_LENGTH (31)
 #define MYNEWT_VAL_BLE_SVC_GAP_DEVICE_NAME_WRITE_PERM (-1)
 #define MYNEWT_VAL_BLE_SVC_GAP_PPCP_MAX_CONN_INTERVAL (0)

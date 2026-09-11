@@ -1,9 +1,12 @@
 name: Build docs
 
 on:
+  push:
   pull_request:
     paths:
       - docs/**
+      - py/**
+      - tests/cpydiff/**
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,9 +17,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
     - name: Install Python packages
-      run: pip install Sphinx
+      run: pip install -r docs/requirements.txt
+    - name: Build unix port
+      run: tools/ci.sh unix_build_helper
     - name: Build docs
       run: make -C docs/ html

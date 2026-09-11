@@ -65,9 +65,19 @@ void mp_irq_init(mp_irq_obj_t *self, const mp_irq_methods_t *methods, mp_obj_t p
     self->ishard = false;
 }
 
-void mp_irq_handler(mp_irq_obj_t *self) {
-    if (self->handler != mp_const_none) {
-        if (self->ishard) {
+int mp_irq_dispatch(mp_obj_t handler, mp_obj_t parent, bool ishard) {
+    int result = 0;
+    if (handler != mp_const_none) {
+        if (ishard) {
+            #if MICROPY_STACK_CHECK && MICROPY_STACK_SIZE_HARD_IRQ > 0
+            // This callback executes in an ISR context so the stack-limit
+            // check must be changed to use the ISR stack for the duration
+            // of this function.
+            char *orig_stack_top = MP_STATE_THREAD(stack_top);
+            size_t orig_stack_limit = MP_STATE_THREAD(stack_limit);
+            mp_cstack_init_with_sp_here(MICROPY_STACK_SIZE_HARD_IRQ);
+            #endif
+
             // When executing code within a handler we must lock the scheduler to
             // prevent any scheduled callbacks from running, and lock the GC to
             // prevent any memory allocations.
@@ -75,34 +85,48 @@ void mp_irq_handler(mp_irq_obj_t *self) {
             gc_lock();
             nlr_buf_t nlr;
             if (nlr_push(&nlr) == 0) {
-                mp_call_function_1(self->handler, self->parent);
+                mp_call_function_1(handler, parent);
                 nlr_pop();
             } else {
-                // Uncaught exception; disable the callback so that it doesn't run again
-                self->methods->trigger(self->parent, 0);
-                self->handler = mp_const_none;
                 mp_printf(MICROPY_ERROR_PRINTER, "Uncaught exception in IRQ callback handler\n");
                 mp_obj_print_exception(MICROPY_ERROR_PRINTER, MP_OBJ_FROM_PTR(nlr.ret_val));
+                result = -1;
             }
             gc_unlock();
             mp_sched_unlock();
+
+            #if MICROPY_STACK_CHECK && MICROPY_STACK_SIZE_HARD_IRQ > 0
+            // Restore original stack-limit checking values.
+            MP_STATE_THREAD(stack_top) = orig_stack_top;
+            MP_STATE_THREAD(stack_limit) = orig_stack_limit;
+            #endif
         } else {
             // Schedule call to user function
-            mp_sched_schedule(self->handler, self->parent);
+            mp_sched_schedule(handler, parent);
         }
+    }
+    return result;
+}
+
+
+void mp_irq_handler(mp_irq_obj_t *self) {
+    if (mp_irq_dispatch(self->handler, self->parent, self->ishard) < 0) {
+        // Uncaught exception; disable the callback so that it doesn't run again
+        self->methods->trigger(self->parent, 0);
+        self->handler = mp_const_none;
     }
 }
 
 /******************************************************************************/
 // MicroPython bindings
 
-STATIC mp_obj_t mp_irq_flags(mp_obj_t self_in) {
+static mp_obj_t mp_irq_flags(mp_obj_t self_in) {
     mp_irq_obj_t *self = MP_OBJ_TO_PTR(self_in);
     return mp_obj_new_int(self->methods->info(self->parent, MP_IRQ_INFO_FLAGS));
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_1(mp_irq_flags_obj, mp_irq_flags);
+static MP_DEFINE_CONST_FUN_OBJ_1(mp_irq_flags_obj, mp_irq_flags);
 
-STATIC mp_obj_t mp_irq_trigger(size_t n_args, const mp_obj_t *args) {
+static mp_obj_t mp_irq_trigger(size_t n_args, const mp_obj_t *args) {
     mp_irq_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     mp_obj_t ret_obj = mp_obj_new_int(self->methods->info(self->parent, MP_IRQ_INFO_TRIGGERS));
     if (n_args == 2) {
@@ -111,19 +135,19 @@ STATIC mp_obj_t mp_irq_trigger(size_t n_args, const mp_obj_t *args) {
     }
     return ret_obj;
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mp_irq_trigger_obj, 1, 2, mp_irq_trigger);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mp_irq_trigger_obj, 1, 2, mp_irq_trigger);
 
-STATIC mp_obj_t mp_irq_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+static mp_obj_t mp_irq_call(mp_obj_t self_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     mp_arg_check_num(n_args, n_kw, 0, 0, false);
     mp_irq_handler(MP_OBJ_TO_PTR(self_in));
     return mp_const_none;
 }
 
-STATIC const mp_rom_map_elem_t mp_irq_locals_dict_table[] = {
+static const mp_rom_map_elem_t mp_irq_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_flags),               MP_ROM_PTR(&mp_irq_flags_obj) },
     { MP_ROM_QSTR(MP_QSTR_trigger),             MP_ROM_PTR(&mp_irq_trigger_obj) },
 };
-STATIC MP_DEFINE_CONST_DICT(mp_irq_locals_dict, mp_irq_locals_dict_table);
+static MP_DEFINE_CONST_DICT(mp_irq_locals_dict, mp_irq_locals_dict_table);
 
 MP_DEFINE_CONST_OBJ_TYPE(
     mp_irq_type,

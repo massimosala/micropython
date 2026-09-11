@@ -1,12 +1,8 @@
 # test sys.tracebacklimit
 
 try:
-    try:
-        import usys as sys
-        import uio as io
-    except ImportError:
-        import sys
-        import io
+    import sys
+    import io
 except ImportError:
     print("SKIP")
     raise SystemExit
@@ -34,7 +30,7 @@ def print_exc(e):
         if l.startswith("  File "):
             l = l.split('"')
             print(l[0], l[2])
-        # uPy and CPy tracebacks differ in that CPy prints a source line for
+        # MPy and CPy tracebacks differ in that CPy prints a source line for
         # each traceback entry.  In this case, we know that offending line
         # has 4-space indent, so filter it out.
         elif not l.startswith("    "):

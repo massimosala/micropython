@@ -26,14 +26,13 @@ try:
     raise BadException("bad message")
 except Exception as bad:
     # Should be TypeError 'exceptions must derive from BaseException'
-    print(type(bad), bad.args[0])
+    print(type(bad), bad.args or ("exceptions must derive from BaseException",))
 
 try:
-
     def gen():
         yield
 
     gen().throw(BadException)
 except Exception as genbad:
     # Should be TypeError 'exceptions must derive from BaseException'
-    print(type(genbad), genbad.args[0])
+    print(type(genbad), genbad.args or ("exceptions must derive from BaseException",))

@@ -3,4 +3,8 @@ open /noexist.py rb
 OSError
 open /test.py rb
 123
+TypeError
+umount
+mount False False
+OSError
 umount

@@ -5,6 +5,7 @@
  *
  * Copyright (c) 2020-2021 Damien P. George
  * Copyright (c) 2021-2023 Philipp Ebensberger
+ * Copyright (c) 2021-2024 Robert Hammelrath
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,6 +30,7 @@
 
 #include "py/runtime.h"
 #include "extmod/vfs.h"
+#include "py/mperrno.h"
 #include "modmimxrt.h"
 #include "flash.h"
 #include BOARD_FLASH_OPS_HEADER_H
@@ -42,11 +44,11 @@ typedef struct _mimxrt_flash_obj_t {
     uint32_t flash_size;
 } mimxrt_flash_obj_t;
 
-STATIC mimxrt_flash_obj_t mimxrt_flash_obj = {
+static mimxrt_flash_obj_t mimxrt_flash_obj = {
     .base = { &mimxrt_flash_type }
 };
 
-STATIC mp_obj_t mimxrt_flash_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
+static mp_obj_t mimxrt_flash_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
     // Check args.
     mp_arg_check_num(n_args, n_kw, 0, 0, false);
 
@@ -60,9 +62,22 @@ STATIC mp_obj_t mimxrt_flash_make_new(const mp_obj_type_t *type, size_t n_args, 
     return MP_OBJ_FROM_PTR(&mimxrt_flash_obj);
 }
 
+static mp_int_t mimxrt_flash_get_buffer(mp_obj_t self_in, mp_buffer_info_t *bufinfo, mp_uint_t flags) {
+    mimxrt_flash_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    if (flags == MP_BUFFER_READ) {
+        bufinfo->buf = (void *)((uintptr_t)&__flash_start + self->flash_base);
+        bufinfo->len = self->flash_size;
+        bufinfo->typecode = 'B';
+        return 0;
+    } else {
+        // Write unsupported.
+        return 1;
+    }
+}
+
 // readblocks(block_num, buf, [offset])
 // read size of buffer number of bytes from block (with offset) into buffer
-STATIC mp_obj_t mimxrt_flash_readblocks(size_t n_args, const mp_obj_t *args) {
+static mp_obj_t mimxrt_flash_readblocks(size_t n_args, const mp_obj_t *args) {
     mimxrt_flash_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(args[2], &bufinfo, MP_BUFFER_WRITE);
@@ -76,13 +91,13 @@ STATIC mp_obj_t mimxrt_flash_readblocks(size_t n_args, const mp_obj_t *args) {
     flash_read_block((self->flash_base + offset), (uint8_t *)bufinfo.buf, (uint32_t)bufinfo.len);
     return mp_const_none;
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mimxrt_flash_readblocks_obj, 3, 4, mimxrt_flash_readblocks);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mimxrt_flash_readblocks_obj, 3, 4, mimxrt_flash_readblocks);
 
 // writeblocks(block_num, buf, [offset])
 // Erase block based on block_num and write buffer size number of bytes from buffer into block. If additional offset
 // parameter is provided only write operation at block start + offset will be performed.
 // This requires a prior erase operation of the block!
-STATIC mp_obj_t mimxrt_flash_writeblocks(size_t n_args, const mp_obj_t *args) {
+static mp_obj_t mimxrt_flash_writeblocks(size_t n_args, const mp_obj_t *args) {
     status_t status;
     mimxrt_flash_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     mp_buffer_info_t bufinfo;
@@ -110,10 +125,10 @@ STATIC mp_obj_t mimxrt_flash_writeblocks(size_t n_args, const mp_obj_t *args) {
 
     return MP_OBJ_NEW_SMALL_INT(status != kStatus_Success);
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mimxrt_flash_writeblocks_obj, 3, 4, mimxrt_flash_writeblocks);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mimxrt_flash_writeblocks_obj, 3, 4, mimxrt_flash_writeblocks);
 
 // ioctl(op, arg)
-STATIC mp_obj_t mimxrt_flash_ioctl(mp_obj_t self_in, mp_obj_t cmd_in, mp_obj_t arg_in) {
+static mp_obj_t mimxrt_flash_ioctl(mp_obj_t self_in, mp_obj_t cmd_in, mp_obj_t arg_in) {
     mimxrt_flash_obj_t *self = MP_OBJ_TO_PTR(self_in);
     mp_int_t cmd = mp_obj_get_int(cmd_in);
     status_t status;
@@ -137,19 +152,53 @@ STATIC mp_obj_t mimxrt_flash_ioctl(mp_obj_t self_in, mp_obj_t cmd_in, mp_obj_t a
             return mp_const_none;
     }
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_3(mimxrt_flash_ioctl_obj, mimxrt_flash_ioctl);
+static MP_DEFINE_CONST_FUN_OBJ_3(mimxrt_flash_ioctl_obj, mimxrt_flash_ioctl);
 
-STATIC const mp_rom_map_elem_t mimxrt_flash_locals_dict_table[] = {
+static const mp_rom_map_elem_t mimxrt_flash_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_readblocks), MP_ROM_PTR(&mimxrt_flash_readblocks_obj) },
     { MP_ROM_QSTR(MP_QSTR_writeblocks), MP_ROM_PTR(&mimxrt_flash_writeblocks_obj) },
     { MP_ROM_QSTR(MP_QSTR_ioctl), MP_ROM_PTR(&mimxrt_flash_ioctl_obj) },
 };
-STATIC MP_DEFINE_CONST_DICT(mimxrt_flash_locals_dict, mimxrt_flash_locals_dict_table);
+static MP_DEFINE_CONST_DICT(mimxrt_flash_locals_dict, mimxrt_flash_locals_dict_table);
 
 MP_DEFINE_CONST_OBJ_TYPE(
     mimxrt_flash_type,
     MP_QSTR_Flash,
     MP_TYPE_FLAG_NONE,
     make_new, mimxrt_flash_make_new,
+    buffer, mimxrt_flash_get_buffer,
     locals_dict, &mimxrt_flash_locals_dict
     );
+
+#if MICROPY_VFS_ROM
+
+extern uint8_t _micropy_hw_romfs_part0_start;
+extern uint8_t _micropy_hw_romfs_part0_size;
+
+// Put VfsRom file system between the code space and the VFS file system.
+// The size is defined in Makefile(s) as linker symbol MICROPY_HW_ROMFS_BYTES.
+// For machine.mem32 the absolute address is required, for the flash functions
+// erase and write the offset to the flash start address.
+#define MICROPY_HW_ROMFS_BASE ((uintptr_t)&_micropy_hw_romfs_part0_start - (uintptr_t)&__flash_start)
+#define MICROPY_HW_ROMFS_BYTES ((uintptr_t)&_micropy_hw_romfs_part0_size)
+
+static mimxrt_flash_obj_t mimxrt_flash_romfs_obj = {
+    .base = { &mimxrt_flash_type },
+};
+
+mp_obj_t mp_vfs_rom_ioctl(size_t n_args, const mp_obj_t *args) {
+    if (MICROPY_HW_ROMFS_BYTES <= 0) {
+        return MP_OBJ_NEW_SMALL_INT(-MP_EINVAL);
+    }
+    switch (mp_obj_get_int(args[0])) {
+        case MP_VFS_ROM_IOCTL_GET_NUMBER_OF_SEGMENTS:
+            return MP_OBJ_NEW_SMALL_INT(1);
+        case MP_VFS_ROM_IOCTL_GET_SEGMENT:
+            mimxrt_flash_romfs_obj.flash_base = MICROPY_HW_ROMFS_BASE;
+            mimxrt_flash_romfs_obj.flash_size = MICROPY_HW_ROMFS_BYTES;
+            return MP_OBJ_FROM_PTR(&mimxrt_flash_romfs_obj);
+        default:
+            return MP_OBJ_NEW_SMALL_INT(-MP_EINVAL);
+    }
+}
+#endif  // MICROPY_VFS_ROM

@@ -31,7 +31,7 @@
 #include "py/mperrno.h"
 #include "ticks.h"
 
-#if defined(IOMUX_TABLE_ENET)
+#if defined(ENET_PHY_ADDRESS) || defined(ENET_1_PHY_ADDRESS)
 
 #include "pin.h"
 #include "shared/netutils/netutils.h"
@@ -44,6 +44,7 @@
 #include "hal/phy/device/phyksz8081/fsl_phyksz8081.h"
 #include "hal/phy/device/phydp83825/fsl_phydp83825.h"
 #include "hal/phy/device/phydp83848/fsl_phydp83848.h"
+#include "hal/phy/device/phydp83867/fsl_phydp83867.h"
 #include "hal/phy/device/phylan8720/fsl_phylan8720.h"
 #include "hal/phy/device/phyrtl8211f/fsl_phyrtl8211f.h"
 
@@ -73,6 +74,8 @@ typedef struct _iomux_table_t {
     uint32_t inputOnfield;
     uint32_t configValue;
 } iomux_table_t;
+
+#if defined(ENET_PHY_ADDRESS)
 
 // ETH0 buffers and handles
 static AT_NONCACHEABLE_SECTION_ALIGN(enet_rx_bd_struct_t g_rxBuffDescrip[ENET_RXBD_NUM], ENET_BUFF_ALIGNMENT);
@@ -110,7 +113,9 @@ static const iomux_table_t iomux_table_enet[] = {
 
 static uint8_t hw_addr[6]; // The MAC address field
 
-#if defined(ENET_DUAL_PORT)
+#endif // defined(ENET_PHY_ADDRESS)
+
+#if defined(ENET_1_PHY_ADDRESS)
 
 // ETH1 buffers and handles
 static AT_NONCACHEABLE_SECTION_ALIGN(enet_rx_bd_struct_t g_rxBuffDescrip_1[ENET_RXBD_NUM], ENET_BUFF_ALIGNMENT);
@@ -147,17 +152,14 @@ static const iomux_table_t iomux_table_enet_1[] = {
 
 static uint8_t hw_addr_1[6]; // The MAC address field
 
-#endif
-
-#if defined(ENET_DUAL_PORT)
+// Define ENET_1 to the appropriate controller for this hardware
 #if defined MIMXRT117x_SERIES
 #define ENET_1 ENET_1G
 #else
 #define ENET_1 ENET2
 #endif
-#else
-#define ENET_1 ENET
-#endif
+
+#endif // defined(ENET_1_PHY_ADDRESS)
 
 #define PHY_AUTONEGO_TIMEOUT_US (5000000)
 #define PHY_SETTLE_TIME_US      (1000)
@@ -177,7 +179,7 @@ static uint8_t hw_addr_1[6]; // The MAC address field
 #define TRACE_ETH_RX    (0x0004)
 #define TRACE_ETH_FULL  (0x0008)
 
-STATIC void eth_trace(eth_t *self, size_t len, const void *data, unsigned int flags) {
+static void eth_trace(eth_t *self, size_t len, const void *data, unsigned int flags) {
     if (((flags & NETUTILS_TRACE_IS_TX) && (self->trace_flags & TRACE_ETH_TX))
         || (!(flags & NETUTILS_TRACE_IS_TX) && (self->trace_flags & TRACE_ETH_RX))) {
         const uint8_t *buf;
@@ -197,7 +199,7 @@ STATIC void eth_trace(eth_t *self, size_t len, const void *data, unsigned int fl
     }
 }
 
-STATIC void eth_process_frame(eth_t *self, uint8_t *buf, size_t length) {
+static void eth_process_frame(eth_t *self, uint8_t *buf, size_t length) {
 
     struct netif *netif = &self->netif;
     if (netif->flags & NETIF_FLAG_LINK_UP) {
@@ -240,7 +242,7 @@ void eth_irq_handler(ENET_Type *base, enet_handle_t *handle,
 }
 
 // Configure the ethernet clock
-STATIC uint32_t eth_clock_init(int eth_id, bool phy_clock) {
+static uint32_t eth_clock_init(int eth_id, bool phy_clock) {
 
     CLOCK_EnableClock(kCLOCK_Iomuxc);
 
@@ -282,7 +284,7 @@ STATIC uint32_t eth_clock_init(int eth_id, bool phy_clock) {
 }
 
 // eth_gpio_init: Configure the GPIO pins
-STATIC void eth_gpio_init(const iomux_table_t iomux_table[], size_t iomux_table_size,
+static void eth_gpio_init(const iomux_table_t iomux_table[], size_t iomux_table_size,
     const machine_pin_obj_t *reset_pin, const machine_pin_obj_t *int_pin) {
 
     gpio_pin_config_t gpio_config = {kGPIO_DigitalOutput, 1, kGPIO_NoIntmode};
@@ -327,8 +329,8 @@ STATIC void eth_gpio_init(const iomux_table_t iomux_table[], size_t iomux_table_
     }
 }
 
-// eth_phy_init: Initilaize the PHY interface
-STATIC void eth_phy_init(phy_handle_t *phyHandle, phy_config_t *phy_config,
+// eth_phy_init: Initialize the PHY interface
+static void eth_phy_init(phy_handle_t *phyHandle, phy_config_t *phy_config,
     phy_speed_t *speed, phy_duplex_t *duplex, uint32_t phy_settle_time) {
 
     bool link = false;
@@ -339,13 +341,17 @@ STATIC void eth_phy_init(phy_handle_t *phyHandle, phy_config_t *phy_config,
     if (status == kStatus_Success) {
         uint64_t t = ticks_us64() + PHY_AUTONEGO_TIMEOUT_US;
         // Wait for auto-negotiation success and link up
-        do {
+        for (;;) {
             PHY_GetAutoNegotiationStatus(phyHandle, &autonego);
             PHY_GetLinkStatus(phyHandle, &link);
             if (autonego && link) {
                 break;
             }
-        } while (ticks_us64() < t);
+            if (ticks_us64() > t) {
+                break;
+            }
+            mp_hal_delay_ms(2);
+        }
         if (!autonego) {
             mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("PHY Auto-negotiation failed."));
         }
@@ -356,6 +362,8 @@ STATIC void eth_phy_init(phy_handle_t *phyHandle, phy_config_t *phy_config,
     mp_hal_delay_us(phy_settle_time);
 }
 
+#if defined(ENET_PHY_ADDRESS)
+
 // eth_init: Set up GPIO and the transceiver
 void eth_init_0(eth_t *self, int eth_id, const phy_operations_t *phy_ops, int phy_addr, bool phy_clock) {
     // Configuration values
@@ -365,7 +373,15 @@ void eth_init_0(eth_t *self, int eth_id, const phy_operations_t *phy_ops, int ph
 
     uint32_t source_clock = eth_clock_init(eth_id, phy_clock);
 
-    eth_gpio_init(iomux_table_enet, ARRAY_SIZE(iomux_table_enet), ENET_RESET_PIN, ENET_INT_PIN);
+    const machine_pin_obj_t *reset_pin = NULL;
+    #if defined(pin_ENET_RESET)
+    reset_pin = pin_ENET_RESET;
+    #endif
+    const machine_pin_obj_t *int_pin = NULL;
+    #if defined(pin_ENET_INT)
+    int_pin = pin_ENET_INT;
+    #endif
+    eth_gpio_init(iomux_table_enet, ARRAY_SIZE(iomux_table_enet), reset_pin, int_pin);
 
     mp_hal_get_mac(0, hw_addr);
 
@@ -389,9 +405,11 @@ void eth_init_0(eth_t *self, int eth_id, const phy_operations_t *phy_ops, int ph
     enet_config.txAccelerConfig = kENET_TxAccelIpCheckEnabled | kENET_TxAccelProtoCheckEnabled;
     // Set interrupt
     enet_config.interrupt |= ENET_TX_INTERRUPT | ENET_RX_INTERRUPT;
+    // Set callback
+    enet_config.callback = eth_irq_handler;
+    enet_config.userData = (void *)self;
 
     ENET_Init(ENET, &g_handle, &enet_config, &buffConfig[0], hw_addr, source_clock);
-    ENET_SetCallback(&g_handle, eth_irq_handler, (void *)self);
     NVIC_SetPriority(ENET_IRQn, IRQ_PRI_PENDSV);
     ENET_EnableInterrupts(ENET, ENET_RX_INTERRUPT);
     ENET_ClearInterruptStatus(ENET, ENET_TX_INTERRUPT | ENET_RX_INTERRUPT | ENET_ERR_INTERRUPT);
@@ -400,7 +418,9 @@ void eth_init_0(eth_t *self, int eth_id, const phy_operations_t *phy_ops, int ph
     ENET_ActiveRead(ENET);
 }
 
-#if defined(ENET_DUAL_PORT)
+#endif // defined(ENET_PHY_ADDRESS)
+
+#if defined(ENET_1_PHY_ADDRESS)
 
 // eth_init: Set up GPIO and the transceiver
 void eth_init_1(eth_t *self, int eth_id, const phy_operations_t *phy_ops, int phy_addr, bool phy_clock) {
@@ -411,7 +431,15 @@ void eth_init_1(eth_t *self, int eth_id, const phy_operations_t *phy_ops, int ph
 
     uint32_t source_clock = eth_clock_init(eth_id, phy_clock);
 
-    eth_gpio_init(iomux_table_enet_1, ARRAY_SIZE(iomux_table_enet_1), ENET_1_RESET_PIN, ENET_1_INT_PIN);
+    const machine_pin_obj_t *reset_pin = NULL;
+    #if defined(pin_ENET_1_RESET)
+    reset_pin = pin_ENET_1_RESET;
+    #endif
+    const machine_pin_obj_t *int_pin = NULL;
+    #if defined(pin_ENET_1_INT)
+    int_pin = pin_ENET_1_INT;
+    #endif
+    eth_gpio_init(iomux_table_enet_1, ARRAY_SIZE(iomux_table_enet_1), reset_pin, int_pin);
 
     #if defined MIMXRT117x_SERIES
     NVIC_SetPriority(ENET_1G_MAC0_Tx_Rx_1_IRQn, IRQ_PRI_PENDSV);
@@ -445,22 +473,25 @@ void eth_init_1(eth_t *self, int eth_id, const phy_operations_t *phy_ops, int ph
     enet_config.txAccelerConfig = kENET_TxAccelIpCheckEnabled | kENET_TxAccelProtoCheckEnabled;
     // Set interrupt
     enet_config.interrupt = ENET_TX_INTERRUPT | ENET_RX_INTERRUPT;
+    // Set callback
+    enet_config.callback = eth_irq_handler;
+    enet_config.userData = (void *)self;
 
     ENET_Init(ENET_1, &g_handle_1, &enet_config, &buffConfig_1[0], hw_addr_1, source_clock);
-    ENET_SetCallback(&g_handle_1, eth_irq_handler, (void *)self);
     ENET_ClearInterruptStatus(ENET_1, ENET_TX_INTERRUPT | ENET_RX_INTERRUPT | ENET_ERR_INTERRUPT);
     ENET_EnableInterrupts(ENET_1, ENET_RX_INTERRUPT);
     ENET_ActiveRead(ENET_1);
 }
 
-#endif
+#endif // defined(ENET_1_PHY_ADDRESS)
+
 // Initialize the phy interface
-STATIC int eth_mac_init(eth_t *self) {
+static int eth_mac_init(eth_t *self) {
     return 0;
 }
 
 // Deinit the interface
-STATIC void eth_mac_deinit(eth_t *self) {
+static void eth_mac_deinit(eth_t *self) {
     // Just as a reminder: Calling ENET_Deinit() twice causes the board to stall
     // with a bus error. Reason unclear. So don't do that for now (or ever).
 }
@@ -472,7 +503,7 @@ void eth_set_trace(eth_t *self, uint32_t value) {
 /*******************************************************************************/
 // ETH-LwIP bindings
 
-STATIC err_t eth_send_frame_blocking(ENET_Type *base, enet_handle_t *handle, uint8_t *buffer, int len) {
+static err_t eth_send_frame_blocking(ENET_Type *base, enet_handle_t *handle, uint8_t *buffer, int len) {
     status_t status;
     int i;
     #define XMIT_LOOP 10
@@ -488,17 +519,29 @@ STATIC err_t eth_send_frame_blocking(ENET_Type *base, enet_handle_t *handle, uin
     return status;
 }
 
-STATIC err_t eth_netif_output(struct netif *netif, struct pbuf *p) {
+static err_t eth_netif_output(struct netif *netif, struct pbuf *p) {
     // This function should always be called from a context where PendSV-level IRQs are disabled
     status_t status;
-    ENET_Type *enet = ENET;
-    enet_handle_t *handle = &g_handle;
+    ENET_Type *enet;
+    enet_handle_t *handle;
 
-    #if defined ENET_DUAL_PORT
+    #if defined(ENET_PHY_ADDRESS) && defined(ENET_1_PHY_ADDRESS)
+    // Dual port: select based on netif->state
     if (netif->state == &eth_instance1) {
         enet = ENET_1;
         handle = &g_handle_1;
+    } else {
+        enet = ENET;
+        handle = &g_handle;
     }
+    #elif defined(ENET_1_PHY_ADDRESS)
+    // Only ENET_1 available
+    enet = ENET_1;
+    handle = &g_handle_1;
+    #else
+    // Only ENET available
+    enet = ENET;
+    handle = &g_handle;
     #endif
 
     eth_trace(netif->state, (size_t)-1, p, NETUTILS_TRACE_IS_TX | NETUTILS_TRACE_NEWLINE);
@@ -520,7 +563,7 @@ STATIC err_t eth_netif_output(struct netif *netif, struct pbuf *p) {
     return status == kStatus_Success ? ERR_OK : ERR_BUF;
 }
 
-STATIC err_t eth_netif_init(struct netif *netif) {
+static err_t eth_netif_init(struct netif *netif) {
     netif->linkoutput = eth_netif_output;
     netif->output = etharp_output;
     netif->mtu = 1500;
@@ -536,20 +579,23 @@ STATIC err_t eth_netif_init(struct netif *netif) {
     return ERR_OK;
 }
 
-STATIC void eth_lwip_init(eth_t *self) {
+static void eth_lwip_init(eth_t *self) {
     struct netif *n = &self->netif;
     ip_addr_t ipconfig[4];
 
     self->netif.hwaddr_len = 6;
+    #if defined(ENET_PHY_ADDRESS)
     if (self == &eth_instance0) {
         memcpy(self->netif.hwaddr, hw_addr, 6);
         IP4_ADDR(&ipconfig[0], 192, 168, 0, 2);
-    #if defined ENET_DUAL_PORT
-    } else {
+    }
+    #endif
+    #if defined(ENET_1_PHY_ADDRESS)
+    if (self == &eth_instance1) {
         memcpy(self->netif.hwaddr, hw_addr_1, 6);
         IP4_ADDR(&ipconfig[0], 192, 168, 0, 3);
-    #endif
     }
+    #endif
     IP4_ADDR(&ipconfig[1], 255, 255, 255, 0);
     IP4_ADDR(&ipconfig[2], 192, 168, 0, 1);
     IP4_ADDR(&ipconfig[3], 8, 8, 8, 8);
@@ -557,9 +603,13 @@ STATIC void eth_lwip_init(eth_t *self) {
     MICROPY_PY_LWIP_ENTER
 
     n->name[0] = 'e';
+    #if defined(ENET_PHY_ADDRESS)
     n->name[1] = (self == &eth_instance0 ? '0' : '1');
+    #else
+    n->name[1] = '1';
+    #endif
     netif_add(n, &ipconfig[0], &ipconfig[1], &ipconfig[2], self, eth_netif_init, ethernet_input);
-    netif_set_hostname(n, mod_network_hostname);
+    netif_set_hostname(n, mod_network_hostname_data);
     netif_set_default(n);
     netif_set_up(n);
 
@@ -572,7 +622,7 @@ STATIC void eth_lwip_init(eth_t *self) {
     MICROPY_PY_LWIP_EXIT
 }
 
-STATIC void eth_lwip_deinit(eth_t *self) {
+static void eth_lwip_deinit(eth_t *self) {
     MICROPY_PY_LWIP_ENTER
     for (struct netif *netif = netif_list; netif != NULL; netif = netif->next) {
         if (netif == &self->netif) {
@@ -599,8 +649,10 @@ int eth_link_status(eth_t *self) {
         }
     } else {
         bool link;
-        #if defined ENET_DUAL_PORT
+        #if defined(ENET_PHY_ADDRESS) && defined(ENET_1_PHY_ADDRESS)
         PHY_GetLinkStatus(self == &eth_instance0 ? &phyHandle : &phyHandle_1, &link);
+        #elif defined(ENET_1_PHY_ADDRESS)
+        PHY_GetLinkStatus(&phyHandle_1, &link);
         #else
         PHY_GetLinkStatus(&phyHandle, &link);
         #endif
@@ -633,10 +685,12 @@ int eth_stop(eth_t *self) {
 }
 
 void eth_low_power_mode(eth_t *self, bool enable) {
-    #if defined ENET_DUAL_PORT
+    #if defined(ENET_PHY_ADDRESS) && defined(ENET_1_PHY_ADDRESS)
     ENET_EnableSleepMode(self == &eth_instance0 ? ENET : ENET_1, enable);
+    #elif defined(ENET_1_PHY_ADDRESS)
+    ENET_EnableSleepMode(ENET_1, enable);
     #else
     ENET_EnableSleepMode(ENET, enable);
     #endif
 }
-#endif // defined(IOMUX_TABLE_ENET)
+#endif // defined(ENET_PHY_ADDRESS) || defined(ENET_1_PHY_ADDRESS)

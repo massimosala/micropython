@@ -32,6 +32,7 @@
 #include "py/runtime.h"
 #include "py/mphal.h"
 #include "shared/netutils/netutils.h"
+#include "eth.h"
 #include "systick.h"
 #include "pendsv.h"
 #include "extmod/modnetwork.h"
@@ -64,14 +65,22 @@ u32_t sys_now(void) {
     return mp_hal_ticks_ms();
 }
 
-STATIC void pyb_lwip_poll(void) {
+static void pyb_lwip_poll(void) {
     #if MICROPY_PY_NETWORK_WIZNET5K
     // Poll the NIC for incoming data
     wiznet5k_poll();
     #endif
 
+    #if defined(MICROPY_HW_ETH_MDC)
+    eth_phy_link_status_poll();
+    #endif
+
     // Run the lwIP internal updates
     sys_check_timeouts();
+
+    #if LWIP_NETIF_LOOPBACK
+    netif_poll_all();
+    #endif
 }
 
 void mod_network_lwip_poll_wrapper(uint32_t ticks_ms) {

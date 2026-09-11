@@ -1,11 +1,8 @@
 # test await expression
 
-try:
-    import usys as sys
-except ImportError:
-    import sys
+import sys
 if sys.implementation.name == 'micropython':
-    # uPy allows normal generators to be awaitables
+    # MicroPython allows normal generators to be awaitables
     coroutine = lambda f: f
 else:
     import types
